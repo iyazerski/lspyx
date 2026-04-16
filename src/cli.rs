@@ -55,21 +55,21 @@ pub(crate) struct GotoArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct PositionArgs {
-    /// Point to the file that contains the target position.
-    #[arg(long)]
+    /// File that contains the target position.
+    #[arg(value_name = "FILE")]
     pub(crate) file: PathBuf,
-    /// Use a 1-based line number.
-    #[arg(long)]
+    /// 1-based line number.
+    #[arg(value_name = "LINE")]
     pub(crate) line: usize,
-    /// Use a 1-based column number.
-    #[arg(long)]
+    /// 1-based column number.
+    #[arg(value_name = "COLUMN")]
     pub(crate) column: usize,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct FileArgs {
-    /// Point to the file to inspect.
-    #[arg(long)]
+    /// File to inspect.
+    #[arg(value_name = "FILE")]
     pub(crate) file: PathBuf,
 }
 
@@ -85,8 +85,8 @@ pub(crate) struct WorkspaceSymbolArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct OutlineArgs {
-    /// Point to the file to outline.
-    #[arg(long)]
+    /// File to outline.
+    #[arg(value_name = "FILE")]
     pub(crate) file: PathBuf,
     /// Limit nesting depth in the rendered outline.
     #[arg(long)]
