@@ -1,12 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use serde_json::Value;
-
-pub(crate) enum Output {
-    Json(Value),
-    Text(String),
-}
 
 #[derive(Debug, Serialize)]
 pub(crate) struct LocationOutput {

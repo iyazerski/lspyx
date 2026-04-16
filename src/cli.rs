@@ -18,10 +18,6 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) workspace: Option<PathBuf>,
 
-    /// Choose a compact output format for agent and script consumption.
-    #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Text)]
-    pub(crate) format: OutputFormat,
-
     /// Limit the number of results returned (does not affect --format count).
     #[arg(long, global = true)]
     pub(crate) limit: Option<usize>,
@@ -41,7 +37,7 @@ pub(crate) enum CommandKind {
     /// Search workspace symbols by name.
     FindSymbol(WorkspaceSymbolArgs),
     /// Identify the symbol at a file position and show hover details.
-    Inspect(PositionArgs),
+    Inspect(InspectArgs),
     /// Build a bounded outline or full symbol tree for a file.
     Outline(OutlineArgs),
     /// Manage the background daemon for a workspace.
@@ -55,6 +51,9 @@ pub(crate) struct GotoArgs {
     /// Choose which semantic target to resolve.
     #[arg(long, value_enum, default_value_t = GotoTarget::Definition)]
     pub(crate) kind: GotoTarget,
+    /// Choose a compact output format for agent and script consumption.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) format: OutputFormat,
 }
 
 #[derive(Args, Debug)]
@@ -64,6 +63,9 @@ pub(crate) struct UsagesArgs {
     /// Exclude the declaration site from results.
     #[arg(long)]
     pub(crate) no_declaration: bool,
+    /// Choose a compact output format for agent and script consumption.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) format: OutputFormat,
 }
 
 #[derive(Args, Debug)]
@@ -88,6 +90,18 @@ pub(crate) struct WorkspaceSymbolArgs {
     /// Restrict results to a symbol kind.
     #[arg(long, value_enum)]
     pub(crate) kind: Option<SymbolKindFilter>,
+    /// Choose a compact output format for agent and script consumption.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) format: OutputFormat,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct InspectArgs {
+    #[command(flatten)]
+    pub(crate) position: PositionArgs,
+    /// Choose a compact output format for agent and script consumption.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) format: OutputFormat,
 }
 
 #[derive(Args, Debug)]
@@ -101,6 +115,9 @@ pub(crate) struct OutlineArgs {
     /// Show the full document symbol tree without pruning.
     #[arg(long)]
     pub(crate) full: bool,
+    /// Choose a compact output format for agent and script consumption.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) format: OutputFormat,
 }
 
 #[derive(Debug)]
@@ -158,17 +175,12 @@ fn parse_colon_location(input: &str) -> Result<(PathBuf, usize, usize)> {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OutputFormat {
-    Json,
     Text,
     Paths,
     Count,
 }
 
 impl OutputFormat {
-    pub(crate) fn is_json(self) -> bool {
-        self == Self::Json
-    }
-
     pub(crate) fn is_paths(self) -> bool {
         self == Self::Paths
     }

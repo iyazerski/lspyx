@@ -1,6 +1,6 @@
 [package]
 name = "lspyx"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "Agent-friendly, read-only LSP CLI for semantic code navigation"
 license = "MIT"

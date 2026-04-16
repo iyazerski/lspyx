@@ -18,8 +18,8 @@ use serde_json::{Value, json};
 use crate::cli::{GotoTarget, OutputFormat, SymbolKindFilter};
 use crate::lsp::{LspSession, column_to_utf16_offset, path_to_file_uri, read_line_text};
 use crate::model::{
-    DocumentSymbolNode, LocationOutput, LocationRecord, OutlineOutput, Output, RangeRecord,
-    SymbolAtOutput, WorkspaceSymbolOutput, WorkspaceSymbolRecord,
+    DocumentSymbolNode, LocationOutput, LocationRecord, OutlineOutput, RangeRecord, SymbolAtOutput,
+    WorkspaceSymbolOutput, WorkspaceSymbolRecord,
 };
 use crate::parse::{
     build_symbol_hierarchy, extract_symbol_at, parse_document_symbols, parse_hover_contents,
@@ -114,59 +114,38 @@ pub enum DaemonRequest {
     },
 }
 
-pub fn run_daemon_command(
-    format: OutputFormat,
-    workspace_override: Option<PathBuf>,
-    args: DaemonArgs,
-) -> Result<Output> {
+pub fn run_daemon_command(workspace_override: Option<PathBuf>, args: DaemonArgs) -> Result<String> {
     let cwd = env::current_dir().context("failed to determine current directory")?;
     let workspace_root = resolve_workspace_root(workspace_override.as_deref(), None, &cwd)?;
 
     match args.command {
         DaemonSubcommand::Ensure(lifecycle) => {
             let status = ensure_daemon(&workspace_root, lifecycle.idle_seconds)?;
-            render_status(format, "daemon-ensure", status)
+            render_status(status)
         }
         DaemonSubcommand::Serve(lifecycle) => {
             serve_daemon(&workspace_root, lifecycle.idle_seconds)?;
-            Ok(Output::Text(format!(
-                "daemon exited for {}",
-                workspace_root.display()
-            )))
+            Ok(format!("daemon exited for {}", workspace_root.display()))
         }
         DaemonSubcommand::Status => {
             let status = daemon_status(&workspace_root)?;
-            render_status(format, "daemon-status", status)
+            render_status(status)
         }
         DaemonSubcommand::Stop => {
             let stopped = stop_daemon(&workspace_root)?;
-            let status = daemon_status(&workspace_root)?;
-            let payload = json!({
-                "stopped": stopped,
-                "status": status,
-            });
-
-            if format.is_json() {
-                return Ok(Output::Json(payload));
-            }
-
-            Ok(Output::Text(format!(
+            Ok(format!(
                 "daemon stopped: {}\nworkspace: {}",
                 stopped,
-                payload["workspace_root"].as_str().unwrap_or("<unknown>")
-            )))
+                workspace_root.display()
+            ))
         }
     }
 }
 
-pub fn run_via_daemon(
-    workspace_root: &Path,
-    request: DaemonRequest,
-    format: OutputFormat,
-) -> Result<Output> {
+pub fn run_via_daemon(workspace_root: &Path, request: DaemonRequest) -> Result<String> {
     // Reuse an already-running daemon directly to avoid an extra ping roundtrip.
     if let Some(response) = send_request(workspace_root, &request)? {
-        return render_daemon_response(response, format);
+        return render_daemon_response(response);
     }
 
     ensure_daemon(workspace_root, DEFAULT_IDLE_SECONDS)?;
@@ -178,7 +157,7 @@ pub fn run_via_daemon(
         )
     })?;
 
-    render_daemon_response(response, format)
+    render_daemon_response(response)
 }
 
 pub fn daemon_status(workspace_root: &Path) -> Result<DaemonStatus> {
@@ -259,33 +238,18 @@ pub fn adapter_status_with_daemon(workspace_root: &Path) -> Result<Value> {
     }))
 }
 
-fn render_status(
-    format: OutputFormat,
-    _command_name: &str,
-    status: DaemonStatus,
-) -> Result<Output> {
-    let payload = json!({
-        "running": status.running,
-        "pid": status.pid,
-        "socket_path": status.socket_path,
-        "workspace_root": status.workspace_root,
-    });
-
-    if format.is_json() {
-        return Ok(Output::Json(payload));
-    }
-
-    let running = payload["running"].as_bool().unwrap_or(false);
-    let pid = payload["pid"]
-        .as_u64()
+fn render_status(status: DaemonStatus) -> Result<String> {
+    let pid = status
+        .pid
         .map(|value| value.to_string())
         .unwrap_or_else(|| "none".to_string());
-    let socket_path = payload["socket_path"].as_str().unwrap_or("<unknown>");
 
-    Ok(Output::Text(format!(
+    Ok(format!(
         "daemon running: {}\npid: {}\nsocket: {}",
-        running, pid, socket_path
-    )))
+        status.running,
+        pid,
+        status.socket_path.display()
+    ))
 }
 
 fn serve_daemon(workspace_root: &Path, idle_seconds: u64) -> Result<()> {
@@ -552,24 +516,16 @@ fn build_location_response(
     build_rendered_response(render_location_output(format, limit, &payload)?)
 }
 
-fn build_rendered_response(output: Output) -> Result<DaemonWireResponse> {
-    match output {
-        Output::Json(value) => Ok(DaemonWireResponse {
-            ok: true,
-            payload: Some(value),
-            text: None,
-            error: None,
-        }),
-        Output::Text(value) => Ok(DaemonWireResponse {
-            ok: true,
-            payload: None,
-            text: Some(value),
-            error: None,
-        }),
-    }
+fn build_rendered_response(text: String) -> Result<DaemonWireResponse> {
+    Ok(DaemonWireResponse {
+        ok: true,
+        payload: None,
+        text: Some(text),
+        error: None,
+    })
 }
 
-fn render_daemon_response(response: DaemonWireResponse, format: OutputFormat) -> Result<Output> {
+fn render_daemon_response(response: DaemonWireResponse) -> Result<String> {
     if !response.ok {
         return Err(anyhow!(
             response
@@ -578,15 +534,7 @@ fn render_daemon_response(response: DaemonWireResponse, format: OutputFormat) ->
         ));
     }
 
-    if format.is_json() {
-        return Ok(Output::Json(
-            response
-                .payload
-                .context("daemon response missing payload for json output")?,
-        ));
-    }
-
-    Ok(Output::Text(response.text.unwrap_or_default()))
+    Ok(response.text.unwrap_or_default())
 }
 
 fn error_response(error: anyhow::Error) -> DaemonWireResponse {
