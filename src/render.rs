@@ -1,35 +1,21 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::cli::{OutputFormat, SymbolKindFilter};
+use crate::cli::SymbolKindFilter;
 use crate::model::{
     DocumentSymbolNode, LocationOutput, LocationRecord, OutlineOutput, SymbolAtOutput,
     WorkspaceSymbolOutput, WorkspaceSymbolRecord, display_path, symbol_kind_name,
 };
-use crate::parse::count_document_symbols;
 
 pub(crate) fn render_location_output(
-    format: OutputFormat,
     limit: Option<usize>,
     payload: &LocationOutput,
 ) -> Result<String> {
-    // Count always reflects the full result set, ignoring limit.
-    if format.is_count() {
-        return Ok(payload.locations.len().to_string());
-    }
-
     let locations = apply_limit(payload.locations.as_slice(), limit);
-
-    if format.is_paths() {
-        let paths = unique_location_paths(&payload.workspace_root, locations);
-        return Ok(paths.join("\n"));
-    }
-
     Ok(format_locations_text(&payload.workspace_root, locations))
 }
 
 pub(crate) fn render_workspace_symbol_output(
-    format: OutputFormat,
     limit: Option<usize>,
     payload: &WorkspaceSymbolOutput,
     kind_filter: Option<SymbolKindFilter>,
@@ -41,18 +27,8 @@ pub(crate) fn render_workspace_symbol_output(
         .collect::<Vec<_>>();
     let mut symbols = select_workspace_symbols(payload.query.as_str(), symbols);
 
-    // Count always reflects the full result set, ignoring limit.
-    if format.is_count() {
-        return Ok(symbols.len().to_string());
-    }
-
     if let Some(n) = limit {
         symbols.truncate(n);
-    }
-
-    if format.is_paths() {
-        let paths = unique_workspace_symbol_paths(&payload.workspace_root, &symbols);
-        return Ok(paths.join("\n"));
     }
 
     Ok(if symbols.is_empty() {
@@ -69,7 +45,7 @@ pub(crate) fn render_workspace_symbol_output(
                 let snippet = symbol
                     .snippet
                     .as_deref()
-                    .map(|s| format!("\n  {s}"))
+                    .map(|s| format!("\n  {}: {s}", symbol.range.start.line))
                     .unwrap_or_default();
                 format!(
                     "{} [{}] {}:{}:{}{}{}",
@@ -87,21 +63,7 @@ pub(crate) fn render_workspace_symbol_output(
     })
 }
 
-pub(crate) fn render_symbol_at_output(
-    format: OutputFormat,
-    payload: &SymbolAtOutput,
-) -> Result<String> {
-    // Count: 1 if symbol found, 0 if not.
-    if format.is_count() {
-        let count = if payload.symbol.is_some() { 1 } else { 0 };
-        return Ok(count.to_string());
-    }
-
-    // Paths: the file being inspected.
-    if format.is_paths() {
-        return Ok(display_path(&payload.workspace_root, &payload.file));
-    }
-
+pub(crate) fn render_symbol_at_output(payload: &SymbolAtOutput) -> Result<String> {
     let symbol_text = payload
         .symbol
         .as_ref()
@@ -120,19 +82,9 @@ pub(crate) fn render_symbol_at_output(
 }
 
 pub(crate) fn render_outline_output(
-    format: OutputFormat,
     limit: Option<usize>,
     payload: &OutlineOutput,
 ) -> Result<String> {
-    // Paths: the file being outlined.
-    if format.is_paths() {
-        return Ok(display_path(&payload.workspace_root, &payload.file));
-    }
-
-    if format.is_count() {
-        return Ok(count_document_symbols(payload.symbols.as_slice()).to_string());
-    }
-
     let symbols = apply_limit(payload.symbols.as_slice(), limit);
 
     Ok(symbols
@@ -147,31 +99,6 @@ fn apply_limit<T>(items: &[T], limit: Option<usize>) -> &[T] {
         Some(n) => &items[..n.min(items.len())],
         None => items,
     }
-}
-
-fn unique_location_paths(workspace_root: &Path, locations: &[LocationRecord]) -> Vec<String> {
-    let mut paths = Vec::new();
-    for location in locations {
-        let value = display_path(workspace_root, &location.file);
-        if !paths.contains(&value) {
-            paths.push(value);
-        }
-    }
-    paths
-}
-
-fn unique_workspace_symbol_paths(
-    workspace_root: &Path,
-    symbols: &[&WorkspaceSymbolRecord],
-) -> Vec<String> {
-    let mut paths = Vec::new();
-    for symbol in symbols {
-        let value = display_path(workspace_root, &symbol.file);
-        if !paths.contains(&value) {
-            paths.push(value);
-        }
-    }
-    paths
 }
 
 fn select_workspace_symbols<'a>(
@@ -207,10 +134,9 @@ fn format_locations_text(workspace_root: &Path, locations: &[LocationRecord]) ->
     locations
         .iter()
         .map(|location| {
-            let snippet = location
-                .snippet
-                .as_ref()
-                .map_or(String::new(), |value| format!("\n  {value}"));
+            let snippet = location.snippet.as_ref().map_or(String::new(), |value| {
+                format!("\n  {}: {value}", location.range.start.line)
+            });
 
             format!(
                 "{}:{}:{}{}",

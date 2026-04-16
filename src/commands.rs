@@ -71,7 +71,6 @@ fn run_goto(
             line: input.line,
             column: input.column,
             target: args.kind,
-            format: args.format,
             limit,
         },
     )
@@ -91,8 +90,7 @@ fn run_usages(
             file: input.file,
             line: input.line,
             column: input.column,
-            include_declaration: !args.no_declaration,
-            format: args.format,
+            include_declaration: !args.exclude_declaration,
             limit,
         },
     )
@@ -111,7 +109,6 @@ fn run_find_symbol(
         DaemonRequest::FindSymbol {
             query: args.query,
             kind: args.kind,
-            format: args.format,
             limit,
         },
     )
@@ -127,7 +124,6 @@ fn run_inspect(workspace_override: Option<PathBuf>, args: InspectArgs) -> Result
             file: input.file,
             line: input.line,
             column: input.column,
-            format: args.format,
         },
     )
 }
@@ -154,7 +150,6 @@ fn run_outline(
         DaemonRequest::Outline {
             file: input.file,
             depth,
-            format: args.format,
             limit,
         },
     )

@@ -15,7 +15,7 @@ use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::cli::{GotoTarget, OutputFormat, SymbolKindFilter};
+use crate::cli::{GotoTarget, SymbolKindFilter};
 use crate::lsp::{LspSession, column_to_utf16_offset, path_to_file_uri, read_line_text};
 use crate::model::{
     DocumentSymbolNode, LocationOutput, LocationRecord, OutlineOutput, RangeRecord, SymbolAtOutput,
@@ -83,7 +83,6 @@ pub enum DaemonRequest {
         line: usize,
         column: usize,
         target: GotoTarget,
-        format: OutputFormat,
         limit: Option<usize>,
     },
     Usages {
@@ -91,25 +90,21 @@ pub enum DaemonRequest {
         line: usize,
         column: usize,
         include_declaration: bool,
-        format: OutputFormat,
         limit: Option<usize>,
     },
     FindSymbol {
         query: String,
         kind: Option<SymbolKindFilter>,
-        format: OutputFormat,
         limit: Option<usize>,
     },
     Inspect {
         file: PathBuf,
         line: usize,
         column: usize,
-        format: OutputFormat,
     },
     Outline {
         file: PathBuf,
         depth: Option<usize>,
-        format: OutputFormat,
         limit: Option<usize>,
     },
 }
@@ -361,7 +356,6 @@ fn dispatch_request(
             line,
             column,
             target,
-            format,
             limit,
         } => {
             // Route each goto target through the corresponding LSP request.
@@ -393,7 +387,6 @@ fn dispatch_request(
                     column,
                     locations,
                 },
-                format,
                 limit,
             )?
         }
@@ -402,7 +395,6 @@ fn dispatch_request(
             line,
             column,
             include_declaration,
-            format,
             limit,
         } => {
             let locations = adapter.reference_locations(
@@ -422,16 +414,10 @@ fn dispatch_request(
                     column,
                     locations,
                 },
-                format,
                 limit,
             )?
         }
-        DaemonRequest::FindSymbol {
-            query,
-            kind,
-            format,
-            limit,
-        } => {
+        DaemonRequest::FindSymbol { query, kind, limit } => {
             let symbols = adapter.workspace_symbol(&query)?;
             // Enrich symbols with source snippets for context.
             let symbols = symbols
@@ -450,16 +436,9 @@ fn dispatch_request(
                 query,
                 symbols,
             };
-            build_rendered_response(render_workspace_symbol_output(
-                format, limit, &payload, kind,
-            )?)?
+            build_rendered_response(render_workspace_symbol_output(limit, &payload, kind)?)?
         }
-        DaemonRequest::Inspect {
-            file,
-            line,
-            column,
-            format,
-        } => {
+        DaemonRequest::Inspect { file, line, column } => {
             let symbol = extract_symbol_at(&file, line, column)?;
             let hover = if symbol.is_some() {
                 Some(adapter.hover(&file, line, column)?)
@@ -477,14 +456,9 @@ fn dispatch_request(
                 hover,
             };
 
-            build_rendered_response(render_symbol_at_output(format, &payload)?)?
+            build_rendered_response(render_symbol_at_output(&payload)?)?
         }
-        DaemonRequest::Outline {
-            file,
-            depth,
-            format,
-            limit,
-        } => {
+        DaemonRequest::Outline { file, depth, limit } => {
             let symbols = adapter.document_symbols(&file)?;
             // Preserve the full tree for --full and prune only when a depth limit is requested.
             let hierarchy = if let Some(depth) = depth {
@@ -501,7 +475,7 @@ fn dispatch_request(
                 symbols: hierarchy,
             };
 
-            build_rendered_response(render_outline_output(format, limit, &payload)?)?
+            build_rendered_response(render_outline_output(limit, &payload)?)?
         }
     };
 
@@ -510,10 +484,9 @@ fn dispatch_request(
 
 fn build_location_response(
     payload: LocationOutput,
-    format: OutputFormat,
     limit: Option<usize>,
 ) -> Result<DaemonWireResponse> {
-    build_rendered_response(render_location_output(format, limit, &payload)?)
+    build_rendered_response(render_location_output(limit, &payload)?)
 }
 
 fn build_rendered_response(text: String) -> Result<DaemonWireResponse> {

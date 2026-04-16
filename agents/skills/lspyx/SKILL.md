@@ -15,16 +15,16 @@ Use `lspyx` for precise Python symbol navigation.
 
 ## Command Choice
 
-- `find-symbol`: find candidate symbols by name across the workspace.
-- `goto`: jump to a definition, declaration, or type from a position.
-- `usages`: find usages from a position.
-- `inspect`: identify the symbol under a cursor and read hover details.
-- `outline`: inspect file structure, either bounded or full.
+- `find-symbol <query>`: find candidate symbols by name across the workspace.
+- `goto <file:line>`: jump to a definition, declaration, or type from a position.
+- `usages <file:line>`: find usages from a position.
+- `inspect <file:line>`: identify the symbol under a cursor and read hover details.
+- `outline <file>`: inspect file structure, either bounded or full.
 
 ## Rules
 
+- Positions use `file:line` format (1-based).
 - If you are targeting a different repo than the current working directory, pass `--workspace /abs/path/to/repo`.
-- Use `--format count` for cardinality questions.
-- Use `--format paths` when file names are enough.
-- Use `--limit N` to cap the number of results returned (does not affect `--format count`).
+- Use `--limit N` to cap the number of results returned.
+- Use `outline --depth N` for structure and `outline --full` only when the complete symbol tree matters.
 - Keep queries narrow: resolve the symbol first, then inspect exact locations.

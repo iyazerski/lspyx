@@ -1,6 +1,6 @@
 # lspyx
 
-`lspyx` is an agent-friendly CLI for Python semantic code navigation through Language Server Protocol servers.
+`lspyx` is a CLI for Python semantic code navigation through Language Server Protocol servers.
 
 `lspyx` supports Python through [`ty`](https://docs.astral.sh/ty/).
 
@@ -14,20 +14,11 @@
 - summarize file structure with `outline`
 - search repo-wide by symbol name with `find-symbol`
 
-For large codebases, `lspyx` provides token-saving formats like
-`--format count`, `--format paths`, and compact workspace-relative JSON.
-
 ## Features
 
 - Read-only semantic navigation
-- Terse text output by default for fast agentic scanning
-- Compact JSON output for agents and scripts
-- Relative paths from the inferred or overridden workspace root
-- `--format count` for cardinality questions
-- `--format paths` for file-only answers
-- `--format json` when you need explicit machine structure
+- Terse text output with workspace-relative paths
 - Persistent daemon mode with automatic startup for semantic commands
-- Companion Codex skill under [`agents/`](./agents)
 
 ## Installation
 
@@ -74,12 +65,6 @@ Unix socket under `~/.cache/lspyx/`.
 - `lspyx daemon ensure` starts it separately when needed
 - `lspyx daemon status` reports whether it is running
 - `lspyx daemon stop` asks it to exit cleanly
-
-## Codex assets
-
-This repo includes reusable Codex assets under [`agents/`](./agents):
-
-- a companion skill in [`agents/skills/lspyx`](./agents/skills/lspyx)
 
 ## Development
 

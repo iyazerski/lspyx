@@ -272,13 +272,6 @@ pub(crate) fn prune_outline_depth(
         .collect()
 }
 
-pub(crate) fn count_document_symbols(symbols: &[DocumentSymbolNode]) -> usize {
-    symbols
-        .iter()
-        .map(|symbol| 1 + count_document_symbols(symbol.children.as_slice()))
-        .sum()
-}
-
 pub(crate) fn extract_symbol_at(
     path: &Path,
     line_number: usize,

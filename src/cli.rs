@@ -8,17 +8,13 @@ use crate::daemon;
 use crate::workspace::canonicalize_path;
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "lspyx",
-    version,
-    about = "Read-only Python semantic lookups for Codex"
-)]
+#[command(name = "lspyx", version, about = "Python semantic navigation")]
 pub(crate) struct Cli {
     /// Override the inferred workspace root when targeting a different repo.
     #[arg(long, global = true)]
     pub(crate) workspace: Option<PathBuf>,
 
-    /// Limit the number of results returned (does not affect --format count).
+    /// Limit the number of results returned.
     #[arg(long, global = true)]
     pub(crate) limit: Option<usize>,
 
@@ -51,9 +47,6 @@ pub(crate) struct GotoArgs {
     /// Choose which semantic target to resolve.
     #[arg(long, value_enum, default_value_t = GotoTarget::Definition)]
     pub(crate) kind: GotoTarget,
-    /// Choose a compact output format for agent and script consumption.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-    pub(crate) format: OutputFormat,
 }
 
 #[derive(Args, Debug)]
@@ -62,16 +55,13 @@ pub(crate) struct UsagesArgs {
     pub(crate) position: PositionArgs,
     /// Exclude the declaration site from results.
     #[arg(long)]
-    pub(crate) no_declaration: bool,
-    /// Choose a compact output format for agent and script consumption.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-    pub(crate) format: OutputFormat,
+    pub(crate) exclude_declaration: bool,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct PositionArgs {
-    /// File position as file:line:column (1-based).
-    #[arg(value_name = "FILE:LINE:COLUMN")]
+    /// File position as file:line (1-based).
+    #[arg(value_name = "FILE:LINE")]
     pub(crate) location: String,
 }
 
@@ -90,18 +80,12 @@ pub(crate) struct WorkspaceSymbolArgs {
     /// Restrict results to a symbol kind.
     #[arg(long, value_enum)]
     pub(crate) kind: Option<SymbolKindFilter>,
-    /// Choose a compact output format for agent and script consumption.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-    pub(crate) format: OutputFormat,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct InspectArgs {
     #[command(flatten)]
     pub(crate) position: PositionArgs,
-    /// Choose a compact output format for agent and script consumption.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-    pub(crate) format: OutputFormat,
 }
 
 #[derive(Args, Debug)]
@@ -115,9 +99,6 @@ pub(crate) struct OutlineArgs {
     /// Show the full document symbol tree without pruning.
     #[arg(long)]
     pub(crate) full: bool,
-    /// Choose a compact output format for agent and script consumption.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
-    pub(crate) format: OutputFormat,
 }
 
 #[derive(Debug)]
@@ -129,16 +110,16 @@ pub(crate) struct CommandInput {
 
 impl CommandInput {
     pub(crate) fn from_position_args(args: PositionArgs) -> Result<Self> {
-        let (file, line, column) = parse_colon_location(&args.location)?;
+        let (file, line) = parse_colon_location(&args.location)?;
 
-        if line == 0 || column == 0 {
-            bail!("line and column must be 1-based values");
+        if line == 0 {
+            bail!("line must be a 1-based value");
         }
 
         Ok(Self {
             file: canonicalize_path(&file)?,
             line,
-            column,
+            column: 1,
         })
     }
 
@@ -151,43 +132,21 @@ impl CommandInput {
     }
 }
 
-/// Parse a `file:line:column` string, splitting from the right to preserve colons in paths.
-fn parse_colon_location(input: &str) -> Result<(PathBuf, usize, usize)> {
-    let mut parts = input.rsplitn(3, ':');
-    let column_str = parts.next().unwrap_or("");
+/// Parse a `file:line` string, splitting from the right to preserve colons in paths.
+fn parse_colon_location(input: &str) -> Result<(PathBuf, usize)> {
+    let mut parts = input.rsplitn(2, ':');
     let line_str = parts.next().unwrap_or("");
     let file_str = parts.next().unwrap_or("");
 
     if file_str.is_empty() {
-        bail!("expected FILE:LINE:COLUMN format, got: {input}");
+        bail!("expected FILE:LINE format, got: {input}");
     }
 
     let line = line_str
         .parse::<usize>()
-        .with_context(|| format!("expected FILE:LINE:COLUMN format, got: {input}"))?;
-    let column = column_str
-        .parse::<usize>()
-        .with_context(|| format!("expected FILE:LINE:COLUMN format, got: {input}"))?;
+        .with_context(|| format!("expected FILE:LINE format, got: {input}"))?;
 
-    Ok((PathBuf::from(file_str), line, column))
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum OutputFormat {
-    Text,
-    Paths,
-    Count,
-}
-
-impl OutputFormat {
-    pub(crate) fn is_paths(self) -> bool {
-        self == Self::Paths
-    }
-
-    pub(crate) fn is_count(self) -> bool {
-        self == Self::Count
-    }
+    Ok((PathBuf::from(file_str), line))
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ValueEnum)]
