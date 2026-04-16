@@ -17,8 +17,8 @@
 ## Features
 
 - Read-only semantic navigation
-- Terse text output with workspace-relative paths
-- Persistent daemon mode with automatic startup for semantic commands
+- Predictable text output with workspace-relative paths and explicit counts
+- Persistent daemon mode with explicit startup
 
 ## Installation
 
@@ -43,6 +43,12 @@ Verify the install and inspect command help:
 lspyx --help
 ```
 
+Start the daemon for your workspace before running semantic commands:
+
+```bash
+lspyx daemon ensure
+```
+
 ## Ty adapter
 
 The built-in adapter looks for `ty` in this order:
@@ -60,9 +66,8 @@ Use `--workspace` to force a specific root.
 `lspyx` uses a persistent background `ty` session per workspace through a
 Unix socket under `~/.cache/lspyx/`.
 
-- Normal semantic commands ensure the daemon and run through it
-- If the daemon cannot be started or reached, the command fails
-- `lspyx daemon ensure` starts it separately when needed
+- Normal semantic commands require a running daemon
+- `lspyx daemon ensure` starts it when needed
 - `lspyx daemon status` reports whether it is running
 - `lspyx daemon stop` asks it to exit cleanly
 

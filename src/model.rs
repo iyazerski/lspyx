@@ -2,14 +2,15 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::cli::GotoTarget;
+
 #[derive(Debug, Serialize)]
 pub(crate) struct LocationOutput {
     pub(crate) ok: bool,
     pub(crate) command: String,
     pub(crate) workspace_root: PathBuf,
-    pub(crate) file: PathBuf,
-    pub(crate) line: usize,
-    pub(crate) column: usize,
+    pub(crate) position: ResolvedPosition,
+    pub(crate) target: Option<GotoTarget>,
     pub(crate) locations: Vec<LocationRecord>,
 }
 
@@ -37,18 +38,28 @@ pub(crate) struct SymbolAtOutput {
     pub(crate) ok: bool,
     pub(crate) command: String,
     pub(crate) workspace_root: PathBuf,
-    pub(crate) file: PathBuf,
-    pub(crate) line: usize,
-    pub(crate) column: usize,
+    pub(crate) position: ResolvedPosition,
     pub(crate) symbol: Option<SymbolAtRecord>,
     pub(crate) hover: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResolvedPosition {
+    pub(crate) file: PathBuf,
+    pub(crate) line: usize,
+    pub(crate) requested_column: usize,
+    pub(crate) resolved_column: Option<usize>,
+    pub(crate) source_line: Option<String>,
+    pub(crate) symbol: Option<SymbolAtRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct SymbolAtRecord {
     pub(crate) name: String,
     pub(crate) start_column: usize,
     pub(crate) end_column: usize,
+    pub(crate) kind: Option<u64>,
+    pub(crate) detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,29 +89,6 @@ pub(crate) struct DocumentSymbolNode {
     pub(crate) range: RangeRecord,
     pub(crate) selection_range: RangeRecord,
     pub(crate) children: Vec<DocumentSymbolNode>,
-}
-
-impl DocumentSymbolNode {
-    pub(crate) fn format_text(&self) -> String {
-        self.format_with_indent(0)
-    }
-
-    fn format_with_indent(&self, indent: usize) -> String {
-        let prefix = "  ".repeat(indent);
-        let mut lines = vec![format!(
-            "{prefix}{} [{}] {}:{}",
-            self.name,
-            symbol_kind_name(self.kind),
-            self.range.start.line,
-            self.range.start.column
-        )];
-
-        for child in &self.children {
-            lines.push(child.format_with_indent(indent + 1));
-        }
-
-        lines.join("\n")
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]

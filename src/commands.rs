@@ -48,7 +48,7 @@ fn run_doctor(workspace_override: Option<PathBuf>) -> Result<String> {
     };
 
     Ok(format!(
-        "lspyx {}\nworkspace: {}\n{}\n{}",
+        "command: doctor\nversion: {}\nworkspace: {}\n{}\n{}",
         env!("CARGO_PKG_VERSION"),
         workspace_root.display(),
         ty_line,

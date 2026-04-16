@@ -7,6 +7,19 @@ use serde::{Deserialize, Serialize};
 use crate::daemon;
 use crate::workspace::canonicalize_path;
 
+const DOCTOR_AFTER_HELP: &str = "Example:\n  lspyx doctor";
+const GOTO_AFTER_HELP: &str =
+    "Examples:\n  lspyx goto src/app.py:42:17\n  lspyx goto src/app.py:42:17 --kind type";
+const USAGES_AFTER_HELP: &str = "Examples:\n  lspyx usages src/app.py:42:17\n  lspyx usages src/app.py:42:17 --exclude-declaration";
+const FIND_SYMBOL_AFTER_HELP: &str =
+    "Examples:\n  lspyx find-symbol User\n  lspyx find-symbol main --kind function --limit 5";
+const INSPECT_AFTER_HELP: &str =
+    "Examples:\n  lspyx inspect src/app.py:42:17\n  lspyx inspect src/app.py:84:9";
+const OUTLINE_AFTER_HELP: &str =
+    "Examples:\n  lspyx outline src/app.py\n  lspyx outline src/app.py --full";
+const DAEMON_AFTER_HELP: &str =
+    "Examples:\n  lspyx daemon status\n  lspyx daemon ensure --idle-seconds 900";
+
 #[derive(Parser, Debug)]
 #[command(name = "lspyx", version, about = "Python semantic navigation")]
 pub(crate) struct Cli {
@@ -25,18 +38,25 @@ pub(crate) struct Cli {
 #[derive(Subcommand, Debug)]
 pub(crate) enum CommandKind {
     /// Check workspace resolution, adapter discovery, and daemon status.
+    #[command(after_help = DOCTOR_AFTER_HELP)]
     Doctor,
     /// Jump to the definition, declaration, or type of the symbol at a file position.
+    #[command(after_help = GOTO_AFTER_HELP)]
     Goto(GotoArgs),
     /// Find usages of the symbol at a file position.
+    #[command(after_help = USAGES_AFTER_HELP)]
     Usages(UsagesArgs),
     /// Search workspace symbols by name.
+    #[command(after_help = FIND_SYMBOL_AFTER_HELP)]
     FindSymbol(WorkspaceSymbolArgs),
     /// Identify the symbol at a file position and show hover details.
+    #[command(after_help = INSPECT_AFTER_HELP)]
     Inspect(InspectArgs),
     /// Build a bounded outline or full symbol tree for a file.
+    #[command(after_help = OUTLINE_AFTER_HELP)]
     Outline(OutlineArgs),
     /// Manage the background daemon for a workspace.
+    #[command(after_help = DAEMON_AFTER_HELP)]
     Daemon(daemon::DaemonArgs),
 }
 
@@ -60,8 +80,8 @@ pub(crate) struct UsagesArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct PositionArgs {
-    /// File position as file:line (1-based).
-    #[arg(value_name = "FILE:LINE")]
+    /// File position as file:line:column (1-based).
+    #[arg(value_name = "FILE:LINE:COLUMN")]
     pub(crate) location: String,
 }
 
@@ -110,16 +130,20 @@ pub(crate) struct CommandInput {
 
 impl CommandInput {
     pub(crate) fn from_position_args(args: PositionArgs) -> Result<Self> {
-        let (file, line) = parse_colon_location(&args.location)?;
+        let (file, line, column) = parse_colon_location(&args.location)?;
 
         if line == 0 {
             bail!("line must be a 1-based value");
         }
 
+        if column == 0 {
+            bail!("column must be a 1-based value");
+        }
+
         Ok(Self {
             file: canonicalize_path(&file)?,
             line,
-            column: 1,
+            column,
         })
     }
 
@@ -132,21 +156,22 @@ impl CommandInput {
     }
 }
 
-/// Parse a `file:line` string, splitting from the right to preserve colons in paths.
-fn parse_colon_location(input: &str) -> Result<(PathBuf, usize)> {
-    let mut parts = input.rsplitn(2, ':');
-    let line_str = parts.next().unwrap_or("");
-    let file_str = parts.next().unwrap_or("");
+/// Parse a `file:line:column` string, splitting from the right to preserve colons in paths.
+fn parse_colon_location(input: &str) -> Result<(PathBuf, usize, usize)> {
+    let parts = input.rsplitn(3, ':').collect::<Vec<_>>();
 
-    if file_str.is_empty() {
-        bail!("expected FILE:LINE format, got: {input}");
+    match parts.as_slice() {
+        [column_str, line_str, file_str] if !file_str.is_empty() => Ok((
+            PathBuf::from(file_str),
+            line_str
+                .parse::<usize>()
+                .with_context(|| format!("expected FILE:LINE:COLUMN format, got: {input}"))?,
+            column_str
+                .parse::<usize>()
+                .with_context(|| format!("expected FILE:LINE:COLUMN format, got: {input}"))?,
+        )),
+        _ => bail!("expected FILE:LINE:COLUMN format, got: {input}"),
     }
-
-    let line = line_str
-        .parse::<usize>()
-        .with_context(|| format!("expected FILE:LINE format, got: {input}"))?;
-
-    Ok((PathBuf::from(file_str), line))
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ValueEnum)]

@@ -18,12 +18,13 @@ use serde_json::{Value, json};
 use crate::cli::{GotoTarget, SymbolKindFilter};
 use crate::lsp::{LspSession, column_to_utf16_offset, path_to_file_uri, read_line_text};
 use crate::model::{
-    DocumentSymbolNode, LocationOutput, LocationRecord, OutlineOutput, RangeRecord, SymbolAtOutput,
-    WorkspaceSymbolOutput, WorkspaceSymbolRecord,
+    DocumentSymbolNode, LocationOutput, LocationRecord, OutlineOutput, RangeRecord,
+    ResolvedPosition, SymbolAtOutput, WorkspaceSymbolOutput, WorkspaceSymbolRecord,
 };
 use crate::parse::{
-    build_symbol_hierarchy, extract_symbol_at, parse_document_symbols, parse_hover_contents,
-    parse_location_response, parse_workspace_symbols, prune_outline_depth,
+    apply_document_symbol_metadata, build_symbol_hierarchy, extract_symbol_at,
+    find_document_symbol, parse_document_symbols, parse_hover_contents, parse_location_response,
+    parse_workspace_symbols, prune_outline_depth,
 };
 use crate::render::{
     render_location_output, render_outline_output, render_symbol_at_output,
@@ -36,6 +37,10 @@ use crate::workspace::{
 const DEFAULT_IDLE_SECONDS: u64 = 1800;
 const DAEMON_POLL_INTERVAL_MILLIS: u64 = 25;
 const DAEMON_STARTUP_TIMEOUT_SECONDS: u64 = 5;
+const ENSURE_AFTER_HELP: &str = "Example:\n  lspyx daemon ensure --idle-seconds 900";
+const SERVE_AFTER_HELP: &str = "Example:\n  lspyx daemon serve --idle-seconds 900";
+const STATUS_AFTER_HELP: &str = "Example:\n  lspyx daemon status";
+const STOP_AFTER_HELP: &str = "Example:\n  lspyx daemon stop";
 
 #[derive(Args, Debug)]
 pub struct DaemonArgs {
@@ -45,9 +50,13 @@ pub struct DaemonArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum DaemonSubcommand {
+    #[command(after_help = ENSURE_AFTER_HELP)]
     Ensure(DaemonLifecycleArgs),
+    #[command(after_help = SERVE_AFTER_HELP)]
     Serve(DaemonLifecycleArgs),
+    #[command(after_help = STATUS_AFTER_HELP)]
     Status,
+    #[command(after_help = STOP_AFTER_HELP)]
     Stop,
 }
 
@@ -116,22 +125,25 @@ pub fn run_daemon_command(workspace_override: Option<PathBuf>, args: DaemonArgs)
     match args.command {
         DaemonSubcommand::Ensure(lifecycle) => {
             let status = ensure_daemon(&workspace_root, lifecycle.idle_seconds)?;
-            render_status(status)
+            render_status("daemon ensure", status)
         }
         DaemonSubcommand::Serve(lifecycle) => {
             serve_daemon(&workspace_root, lifecycle.idle_seconds)?;
-            Ok(format!("daemon exited for {}", workspace_root.display()))
+            Ok(format!(
+                "command: daemon serve\nworkspace: {}\nresult: daemon exited",
+                workspace_root.display()
+            ))
         }
         DaemonSubcommand::Status => {
             let status = daemon_status(&workspace_root)?;
-            render_status(status)
+            render_status("daemon status", status)
         }
         DaemonSubcommand::Stop => {
             let stopped = stop_daemon(&workspace_root)?;
             Ok(format!(
-                "daemon stopped: {}\nworkspace: {}",
-                stopped,
-                workspace_root.display()
+                "command: daemon stop\nworkspace: {}\nstopped: {}",
+                workspace_root.display(),
+                stopped
             ))
         }
     }
@@ -143,16 +155,11 @@ pub fn run_via_daemon(workspace_root: &Path, request: DaemonRequest) -> Result<S
         return render_daemon_response(response);
     }
 
-    ensure_daemon(workspace_root, DEFAULT_IDLE_SECONDS)?;
-
-    let response = wait_for_daemon_response(workspace_root, &request)?.with_context(|| {
-        format!(
-            "daemon is not available for workspace {} after startup",
-            workspace_root.display()
-        )
-    })?;
-
-    render_daemon_response(response)
+    bail!(
+        "daemon not running for workspace {}; run `lspyx daemon ensure --workspace {}` first",
+        workspace_root.display(),
+        workspace_root.display()
+    )
 }
 
 pub fn daemon_status(workspace_root: &Path) -> Result<DaemonStatus> {
@@ -233,14 +240,15 @@ pub fn adapter_status_with_daemon(workspace_root: &Path) -> Result<Value> {
     }))
 }
 
-fn render_status(status: DaemonStatus) -> Result<String> {
+fn render_status(command: &str, status: DaemonStatus) -> Result<String> {
     let pid = status
         .pid
         .map(|value| value.to_string())
         .unwrap_or_else(|| "none".to_string());
 
     Ok(format!(
-        "daemon running: {}\npid: {}\nsocket: {}",
+        "command: {command}\nworkspace: {}\nrunning: {}\npid: {}\nsocket: {}",
+        status.workspace_root.display(),
         status.running,
         pid,
         status.socket_path.display()
@@ -358,21 +366,25 @@ fn dispatch_request(
             target,
             limit,
         } => {
+            let position = adapter.resolve_position(&file, line, column)?;
+
             // Route each goto target through the corresponding LSP request.
             let locations = match target {
-                GotoTarget::Definition => adapter.definition_locations(&file, line, column)?,
+                GotoTarget::Definition => {
+                    adapter.definition_locations(&file, line, position.requested_column)?
+                }
                 GotoTarget::Declaration => adapter.request_locations(
                     "textDocument/declaration",
                     &file,
                     line,
-                    column,
+                    position.requested_column,
                     false,
                 )?,
                 GotoTarget::Type => adapter.request_locations(
                     "textDocument/typeDefinition",
                     &file,
                     line,
-                    column,
+                    position.requested_column,
                     false,
                 )?,
             };
@@ -382,9 +394,8 @@ fn dispatch_request(
                     ok: true,
                     command: "goto".to_string(),
                     workspace_root: workspace_root.to_path_buf(),
-                    file,
-                    line,
-                    column,
+                    position,
+                    target: Some(target),
                     locations,
                 },
                 limit,
@@ -397,21 +408,22 @@ fn dispatch_request(
             include_declaration,
             limit,
         } => {
+            let position = adapter.resolve_position(&file, line, column)?;
             let locations = adapter.reference_locations(
                 workspace_root,
                 &file,
                 line,
-                column,
+                position.requested_column,
                 include_declaration,
             )?;
+
             build_location_response(
                 LocationOutput {
                     ok: true,
                     command: "usages".to_string(),
                     workspace_root: workspace_root.to_path_buf(),
-                    file,
-                    line,
-                    column,
+                    position,
+                    target: None,
                     locations,
                 },
                 limit,
@@ -439,20 +451,14 @@ fn dispatch_request(
             build_rendered_response(render_workspace_symbol_output(limit, &payload, kind)?)?
         }
         DaemonRequest::Inspect { file, line, column } => {
-            let symbol = extract_symbol_at(&file, line, column)?;
-            let hover = if symbol.is_some() {
-                Some(adapter.hover(&file, line, column)?)
-            } else {
-                None
-            };
+            let position = adapter.resolve_position(&file, line, column)?;
+            let hover = Some(adapter.hover(&file, line, position.requested_column)?);
             let payload = SymbolAtOutput {
                 ok: true,
                 command: "inspect".to_string(),
                 workspace_root: workspace_root.to_path_buf(),
-                file,
-                line,
-                column,
-                symbol,
+                symbol: position.symbol.clone(),
+                position,
                 hover,
             };
 
@@ -561,21 +567,6 @@ fn send_request(
     Ok(Some(serde_json::from_slice(&response_body)?))
 }
 
-fn wait_for_daemon_response(
-    workspace_root: &Path,
-    request: &DaemonRequest,
-) -> Result<Option<DaemonWireResponse>> {
-    let deadline = Instant::now() + Duration::from_secs(DAEMON_STARTUP_TIMEOUT_SECONDS);
-    while Instant::now() < deadline {
-        if let Some(response) = send_request(workspace_root, request)? {
-            return Ok(Some(response));
-        }
-        thread::sleep(Duration::from_millis(DAEMON_POLL_INTERVAL_MILLIS));
-    }
-
-    Ok(None)
-}
-
 fn read_request(stream: &mut UnixStream) -> Result<DaemonRequest> {
     let body = read_frame(stream)?;
     serde_json::from_slice(&body).context("failed to parse daemon request")
@@ -659,6 +650,39 @@ impl PersistentAdapter {
 
     fn shutdown(&mut self) -> Result<()> {
         self.session.shutdown()
+    }
+
+    fn resolve_position(
+        &mut self,
+        file: &Path,
+        line: usize,
+        requested_column: usize,
+    ) -> Result<ResolvedPosition> {
+        self.ensure_file_synced(file)?;
+
+        let source_line = read_line_text(file, line)
+            .ok()
+            .map(|value| value.trim().to_string());
+        let symbol = extract_symbol_at(file, line, requested_column)?;
+        let resolved_column = symbol.as_ref().map(|value| value.start_column);
+        let symbol = if let Some(symbol) = symbol {
+            let document_symbols = self.document_symbols(file)?;
+            let document_symbol =
+                find_document_symbol(document_symbols.as_slice(), line, symbol.start_column)
+                    .filter(|value| value.name == symbol.name);
+            Some(apply_document_symbol_metadata(symbol, document_symbol))
+        } else {
+            None
+        };
+
+        Ok(ResolvedPosition {
+            file: file.to_path_buf(),
+            line,
+            requested_column,
+            resolved_column,
+            source_line,
+            symbol,
+        })
     }
 
     fn definition_locations(

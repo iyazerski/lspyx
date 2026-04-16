@@ -319,7 +319,49 @@ pub(crate) fn extract_symbol_at(
         name: characters[start..end].iter().collect(),
         start_column: start + 1,
         end_column: end + 1,
+        kind: None,
+        detail: None,
     }))
+}
+
+pub(crate) fn find_document_symbol(
+    symbols: &[DocumentSymbolNode],
+    line: usize,
+    column: usize,
+) -> Option<&DocumentSymbolNode> {
+    for symbol in symbols {
+        if !range_contains(
+            &symbol.selection_range,
+            &RangeRecord {
+                start: PositionRecord { line, column },
+                end: PositionRecord { line, column },
+            },
+        ) {
+            continue;
+        }
+
+        if let Some(child) = find_document_symbol(symbol.children.as_slice(), line, column) {
+            return Some(child);
+        }
+
+        return Some(symbol);
+    }
+
+    None
+}
+
+pub(crate) fn apply_document_symbol_metadata(
+    symbol: SymbolAtRecord,
+    document_symbol: Option<&DocumentSymbolNode>,
+) -> SymbolAtRecord {
+    match document_symbol {
+        Some(document_symbol) => SymbolAtRecord {
+            kind: Some(document_symbol.kind),
+            detail: document_symbol.detail.clone(),
+            ..symbol
+        },
+        None => symbol,
+    }
 }
 
 fn is_symbol_char(value: char) -> bool {
