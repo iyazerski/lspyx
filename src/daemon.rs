@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::env;
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
@@ -46,6 +47,10 @@ const STOP_AFTER_HELP: &str = "Example:\n  lspyx daemon stop";
 
 #[derive(Args, Debug)]
 pub struct DaemonArgs {
+    /// Optional override for a different repo; omit in the current workspace.
+    #[arg(long)]
+    pub workspace: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: DaemonSubcommand,
 }
@@ -120,9 +125,9 @@ pub enum DaemonRequest {
     },
 }
 
-pub fn run_daemon_command(workspace_override: Option<PathBuf>, args: DaemonArgs) -> Result<String> {
+pub fn run_daemon_command(args: DaemonArgs) -> Result<String> {
     let cwd = env::current_dir().context("failed to determine current directory")?;
-    let workspace_root = resolve_workspace_root(workspace_override.as_deref(), None, &cwd)?;
+    let workspace_root = resolve_workspace_root(args.workspace.as_deref(), None, &cwd)?;
 
     match args.command {
         DaemonSubcommand::Ensure(lifecycle) => {
@@ -243,24 +248,35 @@ fn spawn_daemon_process(workspace_root: &Path, idle_seconds: u64) -> Result<()> 
             unsafe { libc::_exit(0) };
         }
 
+        let stderr = if env::var_os("LSPYX_DEBUG").is_some() {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        };
         let mut command = Command::new(current_exe);
         let error = command
-            .arg("--workspace")
-            .arg(workspace_root)
-            .arg("daemon")
-            .arg("serve")
-            .arg("--idle-seconds")
-            .arg(idle_seconds.to_string())
+            .args(daemon_serve_args(workspace_root, idle_seconds))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .exec();
-        let _ = error;
+        debug_log(format!("failed to exec daemon process: {error}"));
         unsafe { libc::_exit(1) };
     }
 
     let _ = unsafe { libc::waitpid(child_pid, std::ptr::null_mut(), 0) };
     Ok(())
+}
+
+fn daemon_serve_args(workspace_root: &Path, idle_seconds: u64) -> Vec<OsString> {
+    vec![
+        OsString::from("daemon"),
+        OsString::from("--workspace"),
+        workspace_root.as_os_str().to_os_string(),
+        OsString::from("serve"),
+        OsString::from("--idle-seconds"),
+        OsString::from(idle_seconds.to_string()),
+    ]
 }
 
 pub fn stop_daemon(workspace_root: &Path) -> Result<bool> {
@@ -1175,4 +1191,29 @@ fn merge_locations(
     }
 
     primary
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    use super::daemon_serve_args;
+
+    #[test]
+    fn daemon_serve_args_place_workspace_under_daemon_subcommand() {
+        let args = daemon_serve_args(Path::new("/tmp/example"), 900);
+
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("daemon"),
+                OsString::from("--workspace"),
+                OsString::from("/tmp/example"),
+                OsString::from("serve"),
+                OsString::from("--idle-seconds"),
+                OsString::from("900"),
+            ]
+        );
+    }
 }

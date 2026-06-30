@@ -1,7 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::cli::{
     Cli, CommandInput, CommandKind, FileArgs, GotoArgs, InspectArgs, OutlineArgs, UsagesArgs,
@@ -12,13 +12,14 @@ use crate::workspace::resolve_workspace_root;
 
 pub(crate) fn run(cli: Cli) -> Result<String> {
     match cli.command {
-        CommandKind::Doctor => run_doctor(cli.workspace),
-        CommandKind::Goto(args) => run_goto(cli.limit, cli.workspace, args),
-        CommandKind::Usages(args) => run_usages(cli.limit, cli.workspace, args),
-        CommandKind::FindSymbol(args) => run_find_symbol(cli.limit, cli.workspace, args),
-        CommandKind::Inspect(args) => run_inspect(cli.workspace, args),
-        CommandKind::Outline(args) => run_outline(cli.limit, cli.workspace, args),
-        CommandKind::Daemon(args) => daemon::run_daemon_command(cli.workspace, args),
+        CommandKind::Doctor(args) => run_doctor(args.workspace),
+        CommandKind::Goto(args) => run_goto(args),
+        CommandKind::Usages(args) => run_usages(args),
+        CommandKind::FindSymbol(args) => run_find_symbol(args),
+        CommandKind::Inspect(args) => run_inspect(args),
+        CommandKind::Outline(args) => run_outline(args),
+        CommandKind::Daemon(args) => daemon::run_daemon_command(args),
+        CommandKind::Mcp(_) => bail!("mcp commands must run through the MCP stdio entrypoint"),
     }
 }
 
@@ -67,11 +68,9 @@ fn doctor_summary(ty_found: bool, daemon_running: bool) -> &'static str {
     }
 }
 
-fn run_goto(
-    limit: Option<usize>,
-    workspace_override: Option<PathBuf>,
-    args: GotoArgs,
-) -> Result<String> {
+fn run_goto(args: GotoArgs) -> Result<String> {
+    let workspace_override = args.common.workspace;
+    let limit = args.common.limit;
     let input = CommandInput::from_position_args(args.position)?;
     let workspace_root = resolve_workspace_for_file(workspace_override, &input.file)?;
 
@@ -87,11 +86,9 @@ fn run_goto(
     )
 }
 
-fn run_usages(
-    limit: Option<usize>,
-    workspace_override: Option<PathBuf>,
-    args: UsagesArgs,
-) -> Result<String> {
+fn run_usages(args: UsagesArgs) -> Result<String> {
+    let workspace_override = args.common.workspace;
+    let limit = args.common.limit;
     let input = CommandInput::from_position_args(args.position)?;
     let workspace_root = resolve_workspace_for_file(workspace_override, &input.file)?;
 
@@ -107,11 +104,9 @@ fn run_usages(
     )
 }
 
-fn run_find_symbol(
-    limit: Option<usize>,
-    workspace_override: Option<PathBuf>,
-    args: WorkspaceSymbolArgs,
-) -> Result<String> {
+fn run_find_symbol(args: WorkspaceSymbolArgs) -> Result<String> {
+    let workspace_override = args.common.workspace;
+    let limit = args.common.limit;
     let cwd = env::current_dir().context("failed to determine current directory")?;
     let workspace_root = resolve_workspace_root(workspace_override.as_deref(), None, &cwd)?;
 
@@ -125,7 +120,8 @@ fn run_find_symbol(
     )
 }
 
-fn run_inspect(workspace_override: Option<PathBuf>, args: InspectArgs) -> Result<String> {
+fn run_inspect(args: InspectArgs) -> Result<String> {
+    let workspace_override = args.common.workspace;
     let input = CommandInput::from_position_args(args.position)?;
     let workspace_root = resolve_workspace_for_file(workspace_override, &input.file)?;
 
@@ -139,15 +135,13 @@ fn run_inspect(workspace_override: Option<PathBuf>, args: InspectArgs) -> Result
     )
 }
 
-fn run_outline(
-    limit: Option<usize>,
-    workspace_override: Option<PathBuf>,
-    args: OutlineArgs,
-) -> Result<String> {
+fn run_outline(args: OutlineArgs) -> Result<String> {
     if args.full && args.depth.is_some() {
         anyhow::bail!("--depth cannot be combined with --full");
     }
 
+    let workspace_override = args.common.workspace;
+    let limit = args.common.limit;
     let input = CommandInput::from_file_args(FileArgs { file: args.file })?;
     let workspace_root = resolve_workspace_for_file(workspace_override, &input.file)?;
     let depth = if args.full {

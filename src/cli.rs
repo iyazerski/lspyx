@@ -2,9 +2,11 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::daemon;
+use crate::mcp;
 use crate::workspace::canonicalize_path;
 
 const DOCTOR_AFTER_HELP: &str = "Example:\n  lspyx doctor";
@@ -19,18 +21,11 @@ const OUTLINE_AFTER_HELP: &str =
     "Examples:\n  lspyx outline src/app.py\n  lspyx outline src/app.py --full";
 const DAEMON_AFTER_HELP: &str =
     "Examples:\n  lspyx daemon status\n  lspyx daemon ensure --idle-seconds 900";
+const MCP_AFTER_HELP: &str = "Example:\n  lspyx mcp serve";
 
 #[derive(Parser, Debug)]
 #[command(name = "lspyx", version, about = "Python semantic navigation")]
 pub(crate) struct Cli {
-    /// Optional override for a different repo; omit in the current workspace.
-    #[arg(long, global = true)]
-    pub(crate) workspace: Option<PathBuf>,
-
-    /// Limit the number of results returned.
-    #[arg(long, global = true)]
-    pub(crate) limit: Option<usize>,
-
     #[command(subcommand)]
     pub(crate) command: CommandKind,
 }
@@ -39,7 +34,7 @@ pub(crate) struct Cli {
 pub(crate) enum CommandKind {
     /// Check workspace resolution, adapter discovery, and daemon status.
     #[command(after_help = DOCTOR_AFTER_HELP)]
-    Doctor,
+    Doctor(WorkspaceArgs),
     /// Jump to the definition, declaration, or type of the symbol at a file position.
     #[command(after_help = GOTO_AFTER_HELP)]
     Goto(GotoArgs),
@@ -58,10 +53,15 @@ pub(crate) enum CommandKind {
     /// Manage the background daemon for a workspace.
     #[command(after_help = DAEMON_AFTER_HELP)]
     Daemon(daemon::DaemonArgs),
+    /// Run lspyx as an MCP server.
+    #[command(after_help = MCP_AFTER_HELP)]
+    Mcp(mcp::McpArgs),
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct GotoArgs {
+    #[command(flatten)]
+    pub(crate) common: WorkspaceLimitArgs,
     #[command(flatten)]
     pub(crate) position: PositionArgs,
     /// Choose which semantic target to resolve.
@@ -71,6 +71,8 @@ pub(crate) struct GotoArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct UsagesArgs {
+    #[command(flatten)]
+    pub(crate) common: WorkspaceLimitArgs,
     #[command(flatten)]
     pub(crate) position: PositionArgs,
     /// Exclude the declaration site from results.
@@ -94,6 +96,8 @@ pub(crate) struct FileArgs {
 
 #[derive(Args, Debug)]
 pub(crate) struct WorkspaceSymbolArgs {
+    #[command(flatten)]
+    pub(crate) common: WorkspaceLimitArgs,
     /// Search text for the symbol name.
     #[arg(value_name = "QUERY")]
     pub(crate) query: String,
@@ -105,11 +109,15 @@ pub(crate) struct WorkspaceSymbolArgs {
 #[derive(Args, Debug)]
 pub(crate) struct InspectArgs {
     #[command(flatten)]
+    pub(crate) common: WorkspaceArgs,
+    #[command(flatten)]
     pub(crate) position: PositionArgs,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct OutlineArgs {
+    #[command(flatten)]
+    pub(crate) common: WorkspaceLimitArgs,
     /// File to outline.
     #[arg(value_name = "FILE")]
     pub(crate) file: PathBuf,
@@ -119,6 +127,23 @@ pub(crate) struct OutlineArgs {
     /// Show the full document symbol tree without pruning.
     #[arg(long)]
     pub(crate) full: bool,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct WorkspaceArgs {
+    /// Optional override for a different repo; omit in the current workspace.
+    #[arg(long)]
+    pub(crate) workspace: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct WorkspaceLimitArgs {
+    /// Optional override for a different repo; omit in the current workspace.
+    #[arg(long)]
+    pub(crate) workspace: Option<PathBuf>,
+    /// Limit the number of results returned.
+    #[arg(long)]
+    pub(crate) limit: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -174,7 +199,7 @@ fn parse_colon_location(input: &str) -> Result<(PathBuf, usize, usize)> {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize, ValueEnum)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize, JsonSchema, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SymbolKindFilter {
     Class,
@@ -198,4 +223,41 @@ pub(crate) enum GotoTarget {
     Definition,
     Declaration,
     Type,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::Cli;
+
+    #[test]
+    fn existing_subcommands_still_parse() {
+        for args in [
+            vec!["lspyx", "doctor"],
+            vec!["lspyx", "find-symbol", "--limit", "5", "User"],
+            vec!["lspyx", "inspect", "src/app.py:1:1"],
+            vec!["lspyx", "goto", "src/app.py:1:1"],
+            vec!["lspyx", "usages", "src/app.py:1:1"],
+            vec!["lspyx", "outline", "src/app.py"],
+            vec!["lspyx", "daemon", "--workspace", ".", "status"],
+        ] {
+            Cli::try_parse_from(args).unwrap();
+        }
+    }
+
+    #[test]
+    fn mcp_serve_subcommand_parses() {
+        Cli::try_parse_from(["lspyx", "mcp", "serve"]).unwrap();
+    }
+
+    #[test]
+    fn mcp_serve_rejects_cli_only_options() {
+        for args in [
+            ["lspyx", "mcp", "--workspace", ".", "serve"],
+            ["lspyx", "mcp", "--limit", "5", "serve"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
 }

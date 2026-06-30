@@ -462,6 +462,7 @@ fn select_workspace_symbols<'a>(
     query: &str,
     symbols: Vec<&'a WorkspaceSymbolRecord>,
 ) -> Vec<&'a WorkspaceSymbolRecord> {
+    let query_lowercase = query.to_lowercase();
     let exact_case_sensitive = symbols
         .iter()
         .copied()
@@ -480,5 +481,107 @@ fn select_workspace_symbols<'a>(
         return exact_case_insensitive;
     }
 
-    symbols
+    let mut prefix_matches = Vec::new();
+    let mut substring_matches = Vec::new();
+    let mut other_matches = Vec::new();
+
+    for symbol in symbols {
+        let name_lowercase = symbol.name.to_lowercase();
+        if name_lowercase.starts_with(query_lowercase.as_str()) {
+            prefix_matches.push(symbol);
+        } else if name_lowercase.contains(query_lowercase.as_str()) {
+            substring_matches.push(symbol);
+        } else {
+            other_matches.push(symbol);
+        }
+    }
+
+    prefix_matches
+        .into_iter()
+        .chain(substring_matches)
+        .chain(other_matches)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::model::{PositionRecord, RangeRecord, WorkspaceSymbolRecord};
+
+    use super::select_workspace_symbols;
+
+    fn symbol(name: &str) -> WorkspaceSymbolRecord {
+        WorkspaceSymbolRecord {
+            name: name.to_string(),
+            kind: 5,
+            container_name: None,
+            file: PathBuf::from("src/app.py"),
+            range: RangeRecord {
+                start: PositionRecord { line: 1, column: 1 },
+                end: PositionRecord { line: 1, column: 1 },
+            },
+            snippet: None,
+        }
+    }
+
+    #[test]
+    fn exact_case_sensitive_workspace_symbol_matches_win() {
+        let symbols = [symbol("order"), symbol("Order"), symbol("OrderManager")];
+        let symbols = symbols.iter().collect();
+
+        let selected = select_workspace_symbols("Order", symbols);
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Order"]
+        );
+    }
+
+    #[test]
+    fn exact_case_insensitive_workspace_symbol_matches_win() {
+        let symbols = [symbol("order"), symbol("OrderManager")];
+        let symbols = symbols.iter().collect();
+
+        let selected = select_workspace_symbols("Order", symbols);
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["order"]
+        );
+    }
+
+    #[test]
+    fn prefix_workspace_symbol_matches_rank_before_substrings() {
+        let symbols = [
+            symbol("TestOrderFlow"),
+            symbol("OrderManager"),
+            symbol("PreOrder"),
+            symbol("OrderPolicy"),
+            symbol("execute_orders"),
+        ];
+        let symbols = symbols.iter().collect();
+
+        let selected = select_workspace_symbols("Order", symbols);
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "OrderManager",
+                "OrderPolicy",
+                "TestOrderFlow",
+                "PreOrder",
+                "execute_orders",
+            ]
+        );
+    }
 }
