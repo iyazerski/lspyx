@@ -57,7 +57,7 @@ if command -v codex >/dev/null 2>&1; then
 fi
 
 if command -v claude >/dev/null 2>&1; then
-  claude mcp add lspyx -- lspyx mcp serve
+  claude mcp add --scope user lspyx -- lspyx mcp serve
 fi
 
 cat <<'EOF'
