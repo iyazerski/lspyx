@@ -1,3 +1,7 @@
+pub(crate) mod model;
+pub(crate) mod parse;
+pub(crate) mod rename;
+
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};

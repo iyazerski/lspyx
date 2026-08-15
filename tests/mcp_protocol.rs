@@ -117,7 +117,7 @@ fn mcp_lists_lspyx_tools() {
         .collect::<Vec<_>>();
     tool_names.sort_unstable();
 
-    assert_eq!(tool_names, vec!["diagnostics", "explore"]);
+    assert_eq!(tool_names, vec!["diagnostics", "explore", "rename"]);
 }
 
 #[test]
@@ -181,6 +181,44 @@ fn mcp_exposes_diagnostics_scope_schema() {
         assert!(
             properties.contains_key(field),
             "input schema missing {field}"
+        );
+    }
+}
+
+#[test]
+fn mcp_exposes_rename_preview_schema() {
+    let mut server = McpServer::start();
+    server.initialize();
+
+    server.send(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": {},
+    }));
+
+    let response = server.read_response();
+    let tools = response["result"]["tools"]
+        .as_array()
+        .expect("tools/list did not return tools");
+    let rename = tools
+        .iter()
+        .find(|tool| tool["name"] == "rename")
+        .expect("missing rename tool");
+    let properties = rename["inputSchema"]["properties"]
+        .as_object()
+        .expect("input schema missing properties");
+
+    for field in ["workspace", "file", "line", "column", "new_name"] {
+        assert!(
+            properties.contains_key(field),
+            "input schema missing {field}"
+        );
+    }
+    for field in ["format", "limit"] {
+        assert!(
+            !properties.contains_key(field),
+            "input schema unexpectedly contains {field}"
         );
     }
 }

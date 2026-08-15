@@ -9,12 +9,13 @@ Use CLI to:
 - summarize file structure with `outline`
 - search repo-wide by symbol name with `find-symbol`
 
-The MCP server exposes two tools:
+The MCP server exposes three tools:
 
 | Tool | Purpose |
 |------|---------|
 | `explore` | Find symbols, outline files, or inspect a position with definition and usages. |
 | `diagnostics` | Run repository-configured Ruff and ty checks for a workspace, directory, or file. |
+| `rename` | Preview a complete validated unified diff for a semantic rename without changing files. |
 
 ## Installation
 
@@ -29,5 +30,5 @@ curl -fsSL https://raw.githubusercontent.com/iyazerski/lspyx/main/install.sh | s
 Add this line to the `AGENTS.md` / `CLAUDE.md` so agents use LSPYX efficiently:
 
 ```md
-- Use lspyx MCP for Python code navigation and diagnostics. Use `explore` to understand code and `diagnostics` to check changes.
+- Use lspyx MCP for Python code navigation, diagnostics, and refactors. Use `explore` to understand code, `diagnostics` to check changes, and `rename` to preview cross-file renames.
 ```

@@ -4,11 +4,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 use url::Url;
 
-use crate::lsp::read_line_text;
-use crate::model::{
-    DocumentSymbolNode, LocationRecord, PositionRecord, RangeRecord, SymbolAtRecord,
-    WorkspaceSymbolRecord,
+use crate::lsp::model::{
+    DocumentSymbolNode, LocationRecord, PositionRecord, RangeRecord, RenameEditRecord,
+    SymbolAtRecord, WorkspaceSymbolRecord,
 };
+use crate::lsp::read_line_text;
 
 pub(crate) fn parse_location_response(value: Value) -> Result<Vec<LocationRecord>> {
     if value.is_null() {
@@ -227,6 +227,68 @@ pub(crate) fn parse_workspace_symbols(value: Value) -> Result<Vec<WorkspaceSymbo
     Ok(output)
 }
 
+pub(crate) fn parse_workspace_edit(value: Value) -> Result<Vec<RenameEditRecord>> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+
+    let mut output = Vec::new();
+
+    // Parse the simple URI-to-edits representation.
+    if let Some(changes) = value.get("changes").and_then(Value::as_object) {
+        for (uri, edits) in changes {
+            parse_text_edits(uri, edits, &mut output)?;
+        }
+    }
+
+    // Parse versioned text document edits.
+    if let Some(document_changes) = value.get("documentChanges").and_then(Value::as_array) {
+        for change in document_changes {
+            let Some(text_document) = change.get("textDocument") else {
+                bail!("rename response contained an unsupported resource operation");
+            };
+            let uri = text_document
+                .get("uri")
+                .and_then(Value::as_str)
+                .context("rename text document edit missing URI")?;
+            let edits = change
+                .get("edits")
+                .context("rename text document edit missing edits")?;
+            parse_text_edits(uri, edits, &mut output)?;
+        }
+    }
+
+    output.sort_by(|left, right| {
+        (&left.file, left.range.start.line, left.range.start.column).cmp(&(
+            &right.file,
+            right.range.start.line,
+            right.range.start.column,
+        ))
+    });
+    Ok(output)
+}
+
+fn parse_text_edits(uri: &str, value: &Value, output: &mut Vec<RenameEditRecord>) -> Result<()> {
+    let edits = value
+        .as_array()
+        .context("rename text edits were not an array")?;
+    let file = file_uri_to_path(uri)?;
+
+    for edit in edits {
+        output.push(RenameEditRecord {
+            file: file.clone(),
+            range: parse_range(edit.get("range").context("rename edit missing range")?)?,
+            new_text: edit
+                .get("newText")
+                .and_then(Value::as_str)
+                .context("rename edit missing newText")?
+                .to_string(),
+        });
+    }
+
+    Ok(())
+}
+
 pub(crate) fn build_symbol_hierarchy(symbols: Vec<DocumentSymbolNode>) -> Vec<DocumentSymbolNode> {
     let mut roots = Vec::new();
 
@@ -402,9 +464,11 @@ fn file_uri_to_path(uri: &str) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use serde_json::json;
 
-    use super::parse_location_response;
+    use super::{parse_location_response, parse_workspace_edit};
 
     #[test]
     fn parse_location_link_uses_target_selection_range() {
@@ -424,5 +488,59 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].range.start.line, 2);
         assert_eq!(parsed[0].range.start.column, 3);
+    }
+
+    #[test]
+    fn parses_workspace_edit_changes() {
+        let value = json!({
+            "changes": {
+                "file:///tmp/example.py": [
+                    {
+                        "range": {
+                            "start": {"line": 1, "character": 2},
+                            "end": {"line": 1, "character": 6}
+                        },
+                        "newText": "Renamed"
+                    }
+                ]
+            }
+        });
+
+        let parsed = parse_workspace_edit(value).unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].file, Path::new("/tmp/example.py"));
+        assert_eq!(parsed[0].range.start.line, 2);
+        assert_eq!(parsed[0].range.start.column, 3);
+        assert_eq!(parsed[0].new_text, "Renamed");
+    }
+
+    #[test]
+    fn parses_workspace_edit_document_changes() {
+        let value = json!({
+            "documentChanges": [
+                {
+                    "textDocument": {
+                        "uri": "file:///tmp/example.py",
+                        "version": 1
+                    },
+                    "edits": [
+                        {
+                            "range": {
+                                "start": {"line": 3, "character": 4},
+                                "end": {"line": 3, "character": 8}
+                            },
+                            "newText": "Renamed"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let parsed = parse_workspace_edit(value).unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].range.start.line, 4);
+        assert_eq!(parsed[0].new_text, "Renamed");
     }
 }

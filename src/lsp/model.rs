@@ -39,6 +39,20 @@ pub(crate) struct SymbolAtOutput {
     pub(crate) hover: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct RenameOutput {
+    pub(crate) ok: bool,
+    pub(crate) workspace_root: PathBuf,
+    pub(crate) position: ResolvedPosition,
+    pub(crate) old_name: String,
+    pub(crate) new_name: String,
+    pub(crate) total: usize,
+    pub(crate) total_files: usize,
+    pub(crate) edits: Vec<RenameEditRecord>,
+    #[serde(skip)]
+    pub(crate) diff: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ResolvedPosition {
     pub(crate) file: PathBuf,
@@ -75,6 +89,13 @@ pub(crate) struct LocationRecord {
     pub(crate) file: PathBuf,
     pub(crate) range: RangeRecord,
     pub(crate) snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RenameEditRecord {
+    pub(crate) file: PathBuf,
+    pub(crate) range: RangeRecord,
+    pub(crate) new_text: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

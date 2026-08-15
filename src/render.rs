@@ -2,9 +2,10 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::cli::{GotoTarget, SymbolKindFilter};
-use crate::model::{
-    DocumentSymbolNode, LocationOutput, LocationRecord, OutlineOutput, ResolvedPosition,
-    SymbolAtOutput, WorkspaceSymbolOutput, WorkspaceSymbolRecord, display_path, symbol_kind_name,
+use crate::lsp::model::{
+    DocumentSymbolNode, LocationOutput, LocationRecord, OutlineOutput, RenameOutput,
+    ResolvedPosition, SymbolAtOutput, WorkspaceSymbolOutput, WorkspaceSymbolRecord, display_path,
+    symbol_kind_name,
 };
 
 pub(crate) fn render_location_output(
@@ -183,6 +184,28 @@ pub(crate) fn render_outline_output(
     ]))
 }
 
+pub(crate) fn render_rename_output(payload: &RenameOutput) -> Result<String> {
+    let summary = rename_summary(
+        payload.total,
+        payload.total_files,
+        &payload.old_name,
+        &payload.new_name,
+    );
+
+    let mut sections = vec![
+        summary,
+        position_context_section(&payload.workspace_root, &payload.position),
+    ];
+    if let Some(diff) = payload.diff.as_deref().filter(|diff| !diff.is_empty()) {
+        sections.push(section(
+            "Unified diff",
+            diff.lines().map(str::to_string).collect(),
+        ));
+    }
+
+    Ok(join_sections(sections))
+}
+
 fn apply_limit<T>(items: &[T], limit: Option<usize>) -> &[T] {
     match limit {
         Some(n) => &items[..n.min(items.len())],
@@ -323,6 +346,22 @@ fn outline_summary(shown: usize, total: usize, workspace_root: &Path, file: &Pat
         "{} in {}",
         format_summary_count(shown, total, "top-level symbol", "top-level symbols"),
         display_file
+    ))
+}
+
+fn rename_summary(total: usize, files: usize, old_name: &str, new_name: &str) -> String {
+    if total == 0 {
+        return sentence(format!(
+            "no edits found to rename {old_name:?} to {new_name:?}"
+        ));
+    }
+
+    sentence(format!(
+        "{} across {} to rename {:?} to {:?}",
+        format_summary_count(total, total, "edit", "edits"),
+        format_summary_count(files, files, "file", "files"),
+        old_name,
+        new_name,
     ))
 }
 
@@ -507,7 +546,7 @@ fn select_workspace_symbols<'a>(
 mod tests {
     use std::path::PathBuf;
 
-    use crate::model::{PositionRecord, RangeRecord, WorkspaceSymbolRecord};
+    use crate::lsp::model::{PositionRecord, RangeRecord, WorkspaceSymbolRecord};
 
     use super::select_workspace_symbols;
 

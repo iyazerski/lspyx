@@ -1,6 +1,6 @@
 [package]
 name = "lspyx"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Agent-friendly Python semantic navigation and diagnostics"
 license = "MIT"
@@ -16,6 +16,7 @@ rmcp = { version = "2.0.0", features = ["transport-io"] }
 schemars = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+similar = "2.7"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 url = "2.5.7"
 which = "8.0.0"

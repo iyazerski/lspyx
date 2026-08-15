@@ -4,8 +4,6 @@ mod daemon;
 mod diagnostics;
 mod lsp;
 mod mcp;
-mod model;
-mod parse;
 mod render;
 mod workspace;
 
