@@ -96,7 +96,7 @@ impl Drop for McpServer {
 }
 
 #[test]
-fn mcp_lists_lspyx_explore_tool() {
+fn mcp_lists_lspyx_tools() {
     let mut server = McpServer::start();
     server.initialize();
 
@@ -111,12 +111,13 @@ fn mcp_lists_lspyx_explore_tool() {
     let tools = response["result"]["tools"]
         .as_array()
         .expect("tools/list did not return tools");
-    let tool_names = tools
+    let mut tool_names = tools
         .iter()
         .map(|tool| tool["name"].as_str().expect("tool missing name"))
         .collect::<Vec<_>>();
+    tool_names.sort_unstable();
 
-    assert_eq!(tool_names, vec!["lspyx_explore"]);
+    assert_eq!(tool_names, vec!["diagnostics", "explore"]);
 }
 
 #[test]
@@ -132,7 +133,14 @@ fn mcp_exposes_explore_control_schema() {
     }));
 
     let response = server.read_response();
-    let input_schema = &response["result"]["tools"][0]["inputSchema"];
+    let tools = response["result"]["tools"]
+        .as_array()
+        .expect("tools/list did not return tools");
+    let explore = tools
+        .iter()
+        .find(|tool| tool["name"] == "explore")
+        .expect("missing explore tool");
+    let input_schema = &explore["inputSchema"];
     let properties = input_schema["properties"]
         .as_object()
         .expect("input schema missing properties");
@@ -146,7 +154,39 @@ fn mcp_exposes_explore_control_schema() {
 }
 
 #[test]
-fn mcp_routes_lspyx_explore_invalid_params() {
+fn mcp_exposes_diagnostics_scope_schema() {
+    let mut server = McpServer::start();
+    server.initialize();
+
+    server.send(json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": {},
+    }));
+
+    let response = server.read_response();
+    let tools = response["result"]["tools"]
+        .as_array()
+        .expect("tools/list did not return tools");
+    let diagnostics = tools
+        .iter()
+        .find(|tool| tool["name"] == "diagnostics")
+        .expect("missing diagnostics tool");
+    let properties = diagnostics["inputSchema"]["properties"]
+        .as_object()
+        .expect("input schema missing properties");
+
+    for field in ["workspace", "path", "limit"] {
+        assert!(
+            properties.contains_key(field),
+            "input schema missing {field}"
+        );
+    }
+}
+
+#[test]
+fn mcp_routes_explore_invalid_params() {
     let mut server = McpServer::start();
     server.initialize();
 
@@ -155,7 +195,7 @@ fn mcp_routes_lspyx_explore_invalid_params() {
         "id": 2,
         "method": "tools/call",
         "params": {
-            "name": "lspyx_explore",
+            "name": "explore",
             "arguments": {
                 "workspace": "/tmp",
             },

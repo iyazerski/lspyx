@@ -9,22 +9,28 @@ use serde_json::{Value, json};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct AdapterStatus {
-    pub(crate) ty: TyBinaryStatus,
+    pub(crate) ty: BinaryStatus,
+    pub(crate) ruff: BinaryStatus,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct TyBinaryStatus {
+pub(crate) struct BinaryStatus {
     pub(crate) found: bool,
     pub(crate) path: Option<String>,
 }
 
 pub(crate) fn adapter_status(workspace_root: &Path) -> AdapterStatus {
     let ty_path = locate_ty_binary(workspace_root).ok();
+    let ruff_path = locate_ruff_binary(workspace_root).ok();
 
     AdapterStatus {
-        ty: TyBinaryStatus {
+        ty: BinaryStatus {
             found: ty_path.is_some(),
             path: ty_path.map(|path| path.display().to_string()),
+        },
+        ruff: BinaryStatus {
+            found: ruff_path.is_some(),
+            path: ruff_path.map(|path| path.display().to_string()),
         },
     }
 }
@@ -62,9 +68,42 @@ pub(crate) fn resolve_workspace_root(
     canonicalize_path(&detect_workspace_root(file, cwd))
 }
 
+pub(crate) fn resolve_workspace_root_for_target(target: &Path, cwd: &Path) -> Result<PathBuf> {
+    let seed = if target.is_dir() {
+        target
+    } else {
+        target.parent().unwrap_or(cwd)
+    };
+
+    canonicalize_path(&detect_workspace_root(None, seed))
+}
+
 pub(crate) fn locate_ty_binary(workspace_root: &Path) -> Result<PathBuf> {
+    locate_workspace_binary(
+        workspace_root,
+        "ty",
+        "LSPYX_TY_PATH",
+        "unable to find ty; set LSPYX_TY_PATH, create .venv/bin/ty, or install ty on PATH",
+    )
+}
+
+pub(crate) fn locate_ruff_binary(workspace_root: &Path) -> Result<PathBuf> {
+    locate_workspace_binary(
+        workspace_root,
+        "ruff",
+        "LSPYX_RUFF_PATH",
+        "unable to find ruff; set LSPYX_RUFF_PATH, create .venv/bin/ruff, or install ruff on PATH",
+    )
+}
+
+fn locate_workspace_binary(
+    workspace_root: &Path,
+    name: &str,
+    override_variable: &str,
+    missing_message: &str,
+) -> Result<PathBuf> {
     // Allow an explicit override for debugging or alternate installs.
-    if let Ok(path) = env::var("LSPYX_TY_PATH") {
+    if let Ok(path) = env::var(override_variable) {
         let resolved = PathBuf::from(path);
         if resolved.is_file() {
             return Ok(resolved);
@@ -72,14 +111,13 @@ pub(crate) fn locate_ty_binary(workspace_root: &Path) -> Result<PathBuf> {
     }
 
     // Prefer the workspace virtualenv to match the active project environment.
-    let local_ty = workspace_root.join(".venv").join("bin").join("ty");
-    if local_ty.is_file() {
-        return Ok(local_ty);
+    let local_binary = workspace_root.join(".venv").join("bin").join(name);
+    if local_binary.is_file() {
+        return Ok(local_binary);
     }
 
     // Fall back to a PATH lookup for globally installed toolchains.
-    which::which("ty")
-        .context("unable to find ty; set LSPYX_TY_PATH, create .venv/bin/ty, or install ty on PATH")
+    which::which(name).context(missing_message.to_string())
 }
 
 pub(crate) fn ty_server_configuration(workspace_root: &Path) -> Result<Value> {

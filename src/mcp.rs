@@ -15,15 +15,17 @@ use serde::Deserialize;
 
 use crate::cli::{GotoTarget, SymbolKindFilter};
 use crate::daemon::{self, DaemonRequest};
-use crate::workspace::{canonicalize_path, resolve_workspace_root};
+use crate::diagnostics::{DEFAULT_DIAGNOSTIC_LIMIT, render_diagnostics, run_diagnostics};
+use crate::workspace::{
+    canonicalize_path, resolve_workspace_root, resolve_workspace_root_for_target,
+};
 
 const DEFAULT_OUTLINE_DEPTH: usize = 2;
 const SERVER_INSTRUCTIONS: &str = "\
-lspyx provides read-only semantic navigation for Python workspaces. Use \
-lspyx_explore before grep when you need symbol search, file outlines, hover \
-details, definitions, or usages. For repo-wide search, pass workspace and \
-query. For relative file paths, pass workspace. For exact symbols, pass file, \
-line, and column. Treat returned snippets and semantic locations as inspected.";
+LSPYX provides agent-friendly Python LSP navigation and diagnostics. Use it \
+for any Python work: explore to understand code and diagnostics to check \
+changes. Start with the smallest useful scope and set limit to keep results \
+focused. Relative paths require workspace.";
 
 #[derive(Args, Debug)]
 pub(crate) struct McpArgs {
@@ -58,6 +60,16 @@ pub(crate) struct ExploreRequest {
     /// Return the complete outline tree; cannot be combined with depth.
     #[serde(default)]
     full: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct DiagnosticsRequest {
+    /// Workspace root; required when path is omitted or relative.
+    workspace: Option<PathBuf>,
+    /// File or directory to diagnose; omit to diagnose the workspace.
+    path: Option<PathBuf>,
+    /// Maximum diagnostics to return; defaults to 100.
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -118,9 +130,9 @@ impl ServerHandler for LspyxMcp {
 #[tool_router]
 impl LspyxMcp {
     #[tool(
-        description = "Explore Python code in one semantic navigation call: search workspace symbols (query + workspace), outline a file (file), or inspect a position (file + line + column) with hover, definition, and usages. Use limit to bound result lists; kind for symbol searches; depth or full for outlines."
+        description = "Navigate and understand Python code. Use query + workspace to find symbols, file alone to outline it, or file + line + column to inspect a symbol with its definition and usages. Use limit to keep results focused."
     )]
-    fn lspyx_explore(
+    fn explore(
         &self,
         Parameters(request): Parameters<ExploreRequest>,
     ) -> Result<CallToolResult, ErrorData> {
@@ -134,6 +146,86 @@ impl LspyxMcp {
             ))])),
         }
     }
+
+    #[tool(
+        description = "Check Python with repository-configured Ruff and ty. Pass workspace and the smallest useful file or directory in path. Omit path only for a repo-wide check. Limit bounds returned findings, not the analysis."
+    )]
+    fn diagnostics(
+        &self,
+        Parameters(request): Parameters<DiagnosticsRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let prepared = prepare_diagnostics(request)
+            .map_err(|error| ErrorData::invalid_params(format!("{error:#}"), None))?;
+        let output = run_diagnostics(&prepared.workspace_root, &prepared.target, prepared.limit);
+        let rendered = render_diagnostics(&output);
+        let structured = serde_json::to_value(&output).map_err(|error| {
+            ErrorData::internal_error(format!("failed to serialize diagnostics: {error}"), None)
+        })?;
+        let mut result = if output.all_tools_failed() {
+            CallToolResult::error(vec![ContentBlock::text(rendered)])
+        } else {
+            CallToolResult::success(vec![ContentBlock::text(rendered)])
+        };
+        result.structured_content = Some(structured);
+        Ok(result)
+    }
+}
+
+#[derive(Debug)]
+struct PreparedDiagnostics {
+    workspace_root: PathBuf,
+    target: PathBuf,
+    limit: usize,
+}
+
+fn prepare_diagnostics(request: DiagnosticsRequest) -> Result<PreparedDiagnostics> {
+    if request.limit == Some(0) {
+        bail!("limit must be greater than 0");
+    }
+
+    let cwd = env::current_dir().context("failed to determine current directory")?;
+    let explicit_workspace = request
+        .workspace
+        .as_deref()
+        .map(canonicalize_path)
+        .transpose()?;
+    if explicit_workspace
+        .as_deref()
+        .is_some_and(|workspace| !workspace.is_dir())
+    {
+        bail!("workspace must be a directory");
+    }
+
+    let target = match request.path.as_deref() {
+        Some(path) if path.is_absolute() => canonicalize_path(path)?,
+        Some(path) => {
+            let workspace = explicit_workspace
+                .as_deref()
+                .context("workspace is required when path is relative")?;
+            canonicalize_path(&workspace.join(path))?
+        }
+        None => explicit_workspace
+            .clone()
+            .context("workspace is required when path is omitted")?,
+    };
+    let workspace_root = match explicit_workspace {
+        Some(workspace) => workspace,
+        None => resolve_workspace_root_for_target(&target, &cwd)?,
+    };
+
+    if !target.starts_with(&workspace_root) {
+        bail!(
+            "path {} is outside workspace {}",
+            target.display(),
+            workspace_root.display()
+        );
+    }
+
+    Ok(PreparedDiagnostics {
+        workspace_root,
+        target,
+        limit: request.limit.unwrap_or(DEFAULT_DIAGNOSTIC_LIMIT),
+    })
 }
 
 pub(crate) fn run_mcp_command(args: McpArgs) -> Result<()> {
@@ -375,8 +467,8 @@ mod tests {
     use rmcp::{handler::server::wrapper::Parameters, model::ErrorCode};
 
     use super::{
-        ExploreRequest, ExploreRoute, LspyxMcp, inspect_found_no_symbol, outline_depth,
-        prepare_explore, select_route, validate_query,
+        DiagnosticsRequest, ExploreRequest, ExploreRoute, LspyxMcp, inspect_found_no_symbol,
+        outline_depth, prepare_diagnostics, prepare_explore, select_route, validate_query,
     };
 
     fn request() -> ExploreRequest {
@@ -394,8 +486,10 @@ mod tests {
     }
 
     #[test]
-    fn exposes_only_explore_tool() {
-        assert_eq!(LspyxMcp::new().tool_names(), vec!["lspyx_explore"]);
+    fn exposes_explore_and_diagnostics_tools() {
+        let mut names = LspyxMcp::new().tool_names();
+        names.sort();
+        assert_eq!(names, vec!["diagnostics", "explore"]);
     }
 
     #[test]
@@ -608,10 +702,35 @@ mod tests {
         let mut request = request();
         request.file = Some("__missing__/app.py".into());
 
-        let error = LspyxMcp::new()
-            .lspyx_explore(Parameters(request))
-            .unwrap_err();
+        let error = LspyxMcp::new().explore(Parameters(request)).unwrap_err();
 
         assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn diagnostics_requires_workspace_without_path() {
+        let error = prepare_diagnostics(DiagnosticsRequest {
+            workspace: None,
+            path: None,
+            limit: None,
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "workspace is required when path is omitted"
+        );
+    }
+
+    #[test]
+    fn diagnostics_rejects_zero_limit() {
+        let error = prepare_diagnostics(DiagnosticsRequest {
+            workspace: Some("/tmp".into()),
+            path: None,
+            limit: Some(0),
+        })
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "limit must be greater than 0");
     }
 }

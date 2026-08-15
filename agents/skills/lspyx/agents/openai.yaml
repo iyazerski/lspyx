@@ -1,4 +1,0 @@
-interface:
-  display_name: "LSPYX Navigator"
-  short_description: "Use lspyx for semantic code lookup"
-  default_prompt: "Use $lspyx for Python semantic lookup before broad text search."

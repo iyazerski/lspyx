@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod daemon;
+mod diagnostics;
 mod lsp;
 mod mcp;
 mod model;

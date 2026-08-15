@@ -292,6 +292,7 @@ pub fn adapter_status_with_daemon(workspace_root: &Path) -> Result<Value> {
         "adapter": "ty",
         "available": adapter.ty.found,
         "ty": adapter.ty,
+        "ruff": adapter.ruff,
         "daemon": {
             "running": daemon.running,
             "socket_path": daemon.socket_path,

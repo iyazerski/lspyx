@@ -28,6 +28,7 @@ fn run_doctor(workspace_override: Option<PathBuf>) -> Result<String> {
     let workspace_root = resolve_workspace_root(workspace_override.as_deref(), None, &cwd)?;
     let adapter = daemon::adapter_status_with_daemon(&workspace_root)?;
     let ty_found = adapter["ty"]["found"].as_bool().unwrap_or(false);
+    let ruff_found = adapter["ruff"]["found"].as_bool().unwrap_or(false);
     let daemon_running = adapter["daemon"]["running"].as_bool().unwrap_or(false);
 
     let ty_line = if ty_found {
@@ -37,6 +38,14 @@ fn run_doctor(workspace_override: Option<PathBuf>) -> Result<String> {
         )
     } else {
         "ty: not found".to_string()
+    };
+    let ruff_line = if ruff_found {
+        format!(
+            "ruff: found at {}",
+            adapter["ruff"]["path"].as_str().unwrap_or("<unknown>")
+        )
+    } else {
+        "ruff: not found".to_string()
     };
     let daemon_line = if daemon_running {
         format!(
@@ -51,21 +60,28 @@ fn run_doctor(workspace_override: Option<PathBuf>) -> Result<String> {
     };
 
     Ok(format!(
-        "summary: {}\nversion: {}\n{}\n{}",
-        doctor_summary(ty_found, daemon_running),
+        "summary: {}\nversion: {}\n{}\n{}\n{}",
+        doctor_summary(ty_found, ruff_found, daemon_running),
         env!("CARGO_PKG_VERSION"),
         ty_line,
+        ruff_line,
         daemon_line
     ))
 }
 
-fn doctor_summary(ty_found: bool, daemon_running: bool) -> &'static str {
-    match (ty_found, daemon_running) {
-        (true, true) => "ty available, daemon running",
-        (true, false) => "ty available, daemon not running",
-        (false, true) => "ty unavailable, daemon running",
-        (false, false) => "ty unavailable, daemon not running",
-    }
+fn doctor_summary(ty_found: bool, ruff_found: bool, daemon_running: bool) -> String {
+    let tools = match (ty_found, ruff_found) {
+        (true, true) => "ty and ruff available",
+        (true, false) => "ty available, ruff unavailable",
+        (false, true) => "ty unavailable, ruff available",
+        (false, false) => "ty and ruff unavailable",
+    };
+    let daemon = if daemon_running {
+        "daemon running"
+    } else {
+        "daemon not running"
+    };
+    format!("{tools}, {daemon}")
 }
 
 fn run_goto(args: GotoArgs) -> Result<String> {

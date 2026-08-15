@@ -52,6 +52,25 @@ if ! command -v ty >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v ruff >/dev/null 2>&1; then
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "ruff is required. Install uv from https://docs.astral.sh/uv/getting-started/installation/, then rerun this script." >&2
+    exit 1
+  fi
+
+  uv tool install ruff
+
+  if [ -d "$HOME/.local/bin" ]; then
+    PATH="$HOME/.local/bin:$PATH"
+    export PATH
+  fi
+fi
+
+if ! command -v ruff >/dev/null 2>&1; then
+  echo "ruff was installed, but it is not on PATH. Add $HOME/.local/bin to PATH." >&2
+  exit 1
+fi
+
 if command -v codex >/dev/null 2>&1; then
   codex mcp add lspyx -- lspyx mcp serve
 fi

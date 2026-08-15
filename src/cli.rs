@@ -24,7 +24,11 @@ const DAEMON_AFTER_HELP: &str =
 const MCP_AFTER_HELP: &str = "Example:\n  lspyx mcp serve";
 
 #[derive(Parser, Debug)]
-#[command(name = "lspyx", version, about = "Python semantic navigation")]
+#[command(
+    name = "lspyx",
+    version,
+    about = "Python semantic navigation and diagnostics"
+)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: CommandKind,
