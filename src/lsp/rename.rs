@@ -68,7 +68,7 @@ fn apply_rename_edits(
             Ok((start, end, edit.new_text.as_str()))
         })
         .collect::<Result<Vec<_>>>()?;
-    ranges.sort_by(|left, right| right.0.cmp(&left.0));
+    ranges.sort_by_key(|range| std::cmp::Reverse(range.0));
 
     let mut updated = original.to_string();
     let mut previous_start = original.len();
