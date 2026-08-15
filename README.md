@@ -12,12 +12,6 @@
 
 ## Installation
 
-### Prerequisites
-
-- [Rust](https://rust-lang.org/tools/install/)
-- [`ty`](https://docs.astral.sh/ty/)
-- [`ruff`](https://docs.astral.sh/ruff/)
-
 ### Quickstart
 
 Install `lspyx`:

@@ -2,7 +2,11 @@
 set -eu
 
 case "$(uname -s)" in
-  Darwin|Linux)
+  Darwin)
+    platform="apple-darwin"
+    ;;
+  Linux)
+    platform="unknown-linux-musl"
     ;;
   *)
     echo "lspyx installer currently supports macOS and Linux only." >&2
@@ -10,22 +14,45 @@ case "$(uname -s)" in
     ;;
 esac
 
-if ! command -v cargo >/dev/null 2>&1; then
-  echo "cargo is required. Install Rust from https://rustup.rs/, then rerun this script." >&2
+case "$(uname -m)" in
+  x86_64|amd64)
+    architecture="x86_64"
+    ;;
+  arm64|aarch64)
+    architecture="aarch64"
+    ;;
+  *)
+    echo "lspyx installer supports x86_64 and ARM64 only." >&2
+    exit 1
+    ;;
+esac
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "curl is required to download lspyx." >&2
   exit 1
 fi
 
-cargo install --git https://github.com/iyazerski/lspyx.git --locked
+asset="lspyx-$architecture-$platform.tar.gz"
+download_url="https://github.com/iyazerski/lspyx/releases/latest/download/$asset"
+install_tmp="$(mktemp -d)"
+trap 'rm -rf "$install_tmp"' EXIT HUP INT TERM
 
-if [ ! -x "$HOME/.cargo/bin/lspyx" ]; then
-  echo "cargo finished, but $HOME/.cargo/bin/lspyx was not found." >&2
-  exit 1
+echo "Downloading $asset..."
+curl -fsSL "$download_url" -o "$install_tmp/$asset"
+curl -fsSL "$download_url.sha256" -o "$install_tmp/$asset.sha256"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$install_tmp" && sha256sum -c "$asset.sha256")
+else
+  (cd "$install_tmp" && shasum -a 256 -c "$asset.sha256")
 fi
+
+tar -xzf "$install_tmp/$asset" -C "$install_tmp"
 
 mkdir -p "$HOME/.local/bin"
-ln -sf "$HOME/.cargo/bin/lspyx" "$HOME/.local/bin/lspyx"
+install -m 755 "$install_tmp/lspyx" "$HOME/.local/bin/lspyx"
 
-PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+PATH="$HOME/.local/bin:$PATH"
 export PATH
 
 if ! command -v lspyx >/dev/null 2>&1; then
@@ -35,8 +62,11 @@ fi
 
 if ! command -v ty >/dev/null 2>&1; then
   if ! command -v uv >/dev/null 2>&1; then
-    echo "ty is required. Install uv from https://docs.astral.sh/uv/getting-started/installation/, then rerun this script." >&2
-    exit 1
+    echo "Installing uv..."
+    curl -LsSf https://astral.sh/uv/install.sh -o "$install_tmp/uv-install.sh"
+    sh "$install_tmp/uv-install.sh"
+    PATH="$HOME/.local/bin:$PATH"
+    export PATH
   fi
 
   uv tool install ty
@@ -54,7 +84,7 @@ fi
 
 if ! command -v ruff >/dev/null 2>&1; then
   if ! command -v uv >/dev/null 2>&1; then
-    echo "ruff is required. Install uv from https://docs.astral.sh/uv/getting-started/installation/, then rerun this script." >&2
+    echo "uv was installed, but it is not on PATH. Add $HOME/.local/bin to PATH." >&2
     exit 1
   fi
 
