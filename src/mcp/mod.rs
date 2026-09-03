@@ -6,11 +6,15 @@ mod rename;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use rmcp::{
-    ErrorData, ServerHandler, ServiceExt,
+    ErrorData, RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo},
+    model::{
+        CallToolResult, ClientJsonRpcMessage, ClientNotification, ClientRequest, ContentBlock,
+        ErrorCode, ServerCapabilities, ServerInfo, ServerJsonRpcMessage,
+    },
+    service::{RxJsonRpcMessage, TxJsonRpcMessage},
     tool, tool_handler, tool_router,
-    transport::stdio,
+    transport::{Transport, async_rw::AsyncRwTransport, stdio},
 };
 
 use self::diagnostics::DiagnosticsRequest;
@@ -131,12 +135,84 @@ pub(crate) fn run_mcp_command(args: McpArgs) -> Result<()> {
 }
 
 async fn serve_mcp() -> Result<()> {
+    let (stdin, stdout) = stdio();
+    let transport = PreInitTransport::new(AsyncRwTransport::new_server(stdin, stdout));
     let service = LspyxMcp::new()
-        .serve(stdio())
+        .serve(transport)
         .await
         .context("failed to initialize MCP server")?;
     service.waiting().await.context("MCP server failed")?;
     Ok(())
+}
+
+struct PreInitTransport<T> {
+    inner: T,
+    initialized: bool,
+}
+
+impl<T> PreInitTransport<T> {
+    fn new(inner: T) -> Self {
+        Self {
+            inner,
+            initialized: false,
+        }
+    }
+}
+
+impl<T> Transport<RoleServer> for PreInitTransport<T>
+where
+    T: Transport<RoleServer>,
+{
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<RoleServer>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.inner.send(item)
+    }
+
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleServer>> {
+        loop {
+            let message = self.inner.receive().await?;
+            if self.initialized {
+                return Some(message);
+            }
+
+            match message {
+                ClientJsonRpcMessage::Request(request)
+                    if matches!(&request.request, ClientRequest::InitializeRequest(_)) =>
+                {
+                    self.initialized = true;
+                    return Some(ClientJsonRpcMessage::Request(request));
+                }
+                ClientJsonRpcMessage::Request(request)
+                    if matches!(&request.request, ClientRequest::CustomRequest(_)) =>
+                {
+                    let error =
+                        ErrorData::new(ErrorCode::METHOD_NOT_FOUND, "Method not found", None);
+                    if self
+                        .inner
+                        .send(ServerJsonRpcMessage::error(error, Some(request.id)))
+                        .await
+                        .is_err()
+                    {
+                        return None;
+                    }
+                }
+                ClientJsonRpcMessage::Notification(notification)
+                    if matches!(
+                        notification.notification,
+                        ClientNotification::CustomNotification(_)
+                    ) => {}
+                other => return Some(other),
+            }
+        }
+    }
+
+    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.inner.close()
+    }
 }
 
 #[cfg(test)]
