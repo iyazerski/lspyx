@@ -101,21 +101,4 @@ if ! command -v ruff >/dev/null 2>&1; then
   exit 1
 fi
 
-if command -v codex >/dev/null 2>&1; then
-  codex mcp add lspyx -- lspyx mcp serve
-fi
-
-if command -v claude >/dev/null 2>&1; then
-  claude mcp add --scope user lspyx -- lspyx mcp serve
-fi
-
-cat <<'EOF'
-
-lspyx is installed.
-
-Manual MCP config for other agents:
-
-[mcp_servers.lspyx]
-command = "lspyx"
-args = ["mcp", "serve"]
-EOF
+echo "lspyx is installed to $HOME/.local/bin/lspyx"
