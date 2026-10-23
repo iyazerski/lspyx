@@ -1,15 +1,14 @@
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::paths::{resolve_optional_file, resolve_workspace};
-use crate::cli::{GotoTarget, SymbolKindFilter};
+use super::resolve_file;
+use crate::cli::{SymbolKindFilter, outline_depth};
 use crate::daemon::{self, DaemonRequest};
-
-const DEFAULT_OUTLINE_DEPTH: usize = 2;
+use crate::workspace::resolve_workspace_root;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct ExploreRequest {
@@ -34,204 +33,129 @@ pub(super) struct ExploreRequest {
     pub(super) full: bool,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub(super) enum ExploreRoute {
-    WorkspaceSymbols,
-    Outline,
-    Position,
+/// The validated exploration to run, selected by which request fields are present.
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum ExploreTarget {
+    WorkspaceSymbols {
+        query: String,
+        kind: Option<SymbolKindFilter>,
+    },
+    Outline {
+        file: PathBuf,
+        depth: Option<usize>,
+    },
+    Position {
+        file: PathBuf,
+        line: usize,
+        column: usize,
+    },
 }
 
 #[derive(Debug)]
 pub(super) struct PreparedExplore {
-    query: Option<String>,
     workspace_root: PathBuf,
-    file: Option<PathBuf>,
-    line: Option<usize>,
-    column: Option<usize>,
     pub(super) limit: Option<usize>,
-    pub(super) kind: Option<SymbolKindFilter>,
-    depth: Option<usize>,
-    full: bool,
-    pub(super) route: ExploreRoute,
+    pub(super) target: ExploreTarget,
 }
 
 pub(super) fn prepare(request: ExploreRequest) -> Result<PreparedExplore> {
-    let route = select_route(&request)?;
-    validate_route_options(&request, &route)?;
-    let query = validate_query(request.query.as_deref(), &route)?;
+    let mut target = select_target(&request)?;
+    let workspace = request.workspace.as_deref();
+    let file = match &mut target {
+        ExploreTarget::Outline { file, .. } | ExploreTarget::Position { file, .. } => {
+            *file = resolve_file(file, workspace)?;
+            Some(file.as_path())
+        }
+        ExploreTarget::WorkspaceSymbols { .. } => None,
+    };
     let cwd = env::current_dir().context("failed to determine current directory")?;
-    let file = resolve_optional_file(request.file.as_deref(), request.workspace.as_deref())?;
-    let workspace_root = resolve_workspace(request.workspace.as_deref(), file.as_deref(), &cwd)?;
+    let workspace_root = resolve_workspace_root(workspace, file, &cwd)?;
 
     Ok(PreparedExplore {
-        query,
         workspace_root,
-        file,
-        line: request.line,
-        column: request.column,
         limit: request.limit,
-        kind: request.kind,
-        depth: request.depth,
-        full: request.full,
-        route,
+        target,
     })
 }
 
 pub(super) fn execute(prepared: PreparedExplore) -> Result<String> {
-    match prepared.route {
-        ExploreRoute::WorkspaceSymbols => daemon::run_via_daemon(
-            &prepared.workspace_root,
-            DaemonRequest::FindSymbol {
-                query: prepared
-                    .query
-                    .context("query is required for workspace symbol search")?,
-                kind: prepared.kind,
-                limit: prepared.limit,
-            },
-        ),
-        ExploreRoute::Outline => {
-            let file = prepared
-                .file
-                .context("file is required for outline exploration")?;
-            daemon::run_via_daemon(
-                &prepared.workspace_root,
-                DaemonRequest::Outline {
-                    file,
-                    depth: outline_depth(prepared.depth, prepared.full),
-                    limit: prepared.limit,
-                },
-            )
+    let limit = prepared.limit;
+    let request = match prepared.target {
+        ExploreTarget::WorkspaceSymbols { query, kind } => {
+            DaemonRequest::FindSymbol { query, kind, limit }
         }
-        ExploreRoute::Position => {
-            let file = prepared
-                .file
-                .context("file is required for position exploration")?;
-            let line = prepared
-                .line
-                .context("line is required for position exploration")?;
-            let column = prepared
-                .column
-                .context("column is required for position exploration")?;
-            run_position_bundle(&prepared.workspace_root, file, line, column, prepared.limit)
-        }
-    }
-}
-
-fn run_position_bundle(
-    workspace_root: &Path,
-    file: PathBuf,
-    line: usize,
-    column: usize,
-    limit: Option<usize>,
-) -> Result<String> {
-    let inspect = daemon::run_via_daemon(
-        workspace_root,
-        DaemonRequest::Inspect {
-            file: file.clone(),
-            line,
-            column,
-        },
-    )?;
-    if inspect_found_no_symbol(inspect.as_str()) {
-        return Ok(section("Inspect", inspect));
-    }
-
-    let definition = daemon::run_via_daemon(
-        workspace_root,
-        DaemonRequest::Goto {
-            file: file.clone(),
-            line,
-            column,
-            target: GotoTarget::Definition,
-            limit,
-        },
-    )?;
-    let usages = daemon::run_via_daemon(
-        workspace_root,
-        DaemonRequest::Usages {
+        ExploreTarget::Outline { file, depth } => DaemonRequest::Outline { file, depth, limit },
+        ExploreTarget::Position { file, line, column } => DaemonRequest::Explore {
             file,
             line,
             column,
-            include_declaration: true,
             limit,
         },
-    )?;
-
-    Ok(format!(
-        "{}\n\n{}\n\n{}",
-        section("Inspect", inspect),
-        section("Definition", definition),
-        section("Usages", usages),
-    ))
-}
-
-pub(super) fn inspect_found_no_symbol(inspect: &str) -> bool {
-    inspect.starts_with("no symbol found at ")
-}
-
-pub(super) fn validate_query(query: Option<&str>, route: &ExploreRoute) -> Result<Option<String>> {
-    if route != &ExploreRoute::WorkspaceSymbols {
-        return Ok(query
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string));
-    }
-
-    let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) else {
-        bail!("query is required when file is omitted");
     };
-    Ok(Some(query.to_string()))
+    daemon::run_via_daemon(&prepared.workspace_root, request)
 }
 
-pub(super) fn select_route(request: &ExploreRequest) -> Result<ExploreRoute> {
+/// Validate option combinations and pick the exploration target without touching the filesystem.
+pub(super) fn select_target(request: &ExploreRequest) -> Result<ExploreTarget> {
+    if request.limit == Some(0) {
+        bail!("limit must be greater than 0");
+    }
+    let has_outline_options = request.depth.is_some() || request.full;
+
     match (&request.file, request.line, request.column) {
         (None, None, None) => {
             if request.workspace.is_none() {
                 bail!("workspace is required when file is omitted");
             }
-            Ok(ExploreRoute::WorkspaceSymbols)
+            if has_outline_options {
+                bail!("depth and full are only supported for file outlines");
+            }
+            let query = request
+                .query
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .context("query is required when file is omitted")?;
+            Ok(ExploreTarget::WorkspaceSymbols {
+                query: query.to_string(),
+                kind: request.kind,
+            })
         }
-        (Some(_), None, None) => Ok(ExploreRoute::Outline),
-        (Some(_), Some(line), Some(column)) => {
+        (Some(file), None, None) => {
+            reject_kind(request)?;
+            if request.depth.is_some() && request.full {
+                bail!("depth cannot be combined with full");
+            }
+            Ok(ExploreTarget::Outline {
+                file: file.clone(),
+                depth: outline_depth(request.depth, request.full),
+            })
+        }
+        (Some(file), Some(line), Some(column)) => {
             if line == 0 {
                 bail!("line must be a 1-based value");
             }
             if column == 0 {
                 bail!("column must be a 1-based value");
             }
-            Ok(ExploreRoute::Position)
+            reject_kind(request)?;
+            if has_outline_options {
+                bail!("depth and full are only supported for file outlines");
+            }
+            Ok(ExploreTarget::Position {
+                file: file.clone(),
+                line,
+                column,
+            })
         }
-        (None, Some(_), _) | (None, _, Some(_)) => bail!("line and column require file"),
-        (Some(_), Some(_), None) | (Some(_), None, Some(_)) => {
-            bail!("line and column must be provided together")
-        }
+        (None, _, _) => bail!("line and column require file"),
+        (Some(_), _, _) => bail!("line and column must be provided together"),
     }
 }
 
-fn validate_route_options(request: &ExploreRequest, route: &ExploreRoute) -> Result<()> {
-    if request.limit == Some(0) {
-        bail!("limit must be greater than 0");
-    }
-    if request.kind.is_some() && route != &ExploreRoute::WorkspaceSymbols {
+fn reject_kind(request: &ExploreRequest) -> Result<()> {
+    if request.kind.is_some() {
         bail!("kind is only supported for workspace symbol search");
     }
-    if (request.depth.is_some() || request.full) && route != &ExploreRoute::Outline {
-        bail!("depth and full are only supported for file outlines");
-    }
-    if request.depth.is_some() && request.full {
-        bail!("depth cannot be combined with full");
-    }
     Ok(())
-}
-
-pub(super) fn outline_depth(depth: Option<usize>, full: bool) -> Option<usize> {
-    if full {
-        None
-    } else {
-        Some(depth.unwrap_or(DEFAULT_OUTLINE_DEPTH))
-    }
-}
-
-fn section(title: &str, body: String) -> String {
-    format!("## {title}\n\n{body}")
 }

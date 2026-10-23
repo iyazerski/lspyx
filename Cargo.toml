@@ -1,6 +1,6 @@
 [package]
 name = "lspyx"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 description = "Agent-friendly Python semantic navigation and diagnostics"
 license = "MIT"
@@ -9,14 +9,14 @@ keywords = ["lsp", "cli", "semantic-navigation", "python", "agent"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
-anyhow = "1.0.100"
-clap = { version = "4.5.40", features = ["derive"] }
-libc = "0.2.177"
-rmcp = { version = "2.0.0", features = ["transport-io"] }
-schemars = "1.0"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
-similar = "2.7"
-tokio = { version = "1", features = ["rt-multi-thread"] }
-url = "2.5.7"
-which = "8.0.0"
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+libc = "0.2.184"
+rmcp = { version = "3.7.0", features = ["transport-io"] }
+schemars = "1.2.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+similar = "3.2.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread"] }
+url = "2.5.8"
+which = "8.0.6"

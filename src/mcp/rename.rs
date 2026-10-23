@@ -5,8 +5,9 @@ use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::paths::{resolve_optional_file, resolve_workspace};
+use super::resolve_file;
 use crate::daemon::{self, DaemonRequest};
+use crate::workspace::resolve_workspace_root;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct RenameRequest {
@@ -44,9 +45,8 @@ pub(super) fn prepare(request: RenameRequest) -> Result<PreparedRename> {
     }
 
     let cwd = env::current_dir().context("failed to determine current directory")?;
-    let file = resolve_optional_file(Some(&request.file), request.workspace.as_deref())?
-        .context("file is required for rename preview")?;
-    let workspace_root = resolve_workspace(request.workspace.as_deref(), Some(&file), &cwd)?;
+    let file = resolve_file(&request.file, request.workspace.as_deref())?;
+    let workspace_root = resolve_workspace_root(request.workspace.as_deref(), Some(&file), &cwd)?;
 
     Ok(PreparedRename {
         workspace_root,

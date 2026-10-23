@@ -1,70 +1,57 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::cli::{
-    Cli, CommandInput, CommandKind, FileArgs, GotoArgs, InspectArgs, OutlineArgs, UsagesArgs,
-    WorkspaceSymbolArgs,
+    Cli, CommandInput, CommandKind, GotoArgs, InspectArgs, OutlineArgs, UsagesArgs,
+    WorkspaceSymbolArgs, outline_depth,
 };
 use crate::daemon::{self, DaemonRequest};
-use crate::workspace::resolve_workspace_root;
+use crate::mcp;
+use crate::workspace::{
+    canonicalize_path, locate_ruff_binary, locate_ty_binary, resolve_workspace_root,
+};
 
-pub(crate) fn run(cli: Cli) -> Result<String> {
-    match cli.command {
-        CommandKind::Doctor(args) => run_doctor(args.workspace),
-        CommandKind::Goto(args) => run_goto(args),
-        CommandKind::Usages(args) => run_usages(args),
-        CommandKind::FindSymbol(args) => run_find_symbol(args),
-        CommandKind::Inspect(args) => run_inspect(args),
-        CommandKind::Outline(args) => run_outline(args),
-        CommandKind::Daemon(args) => daemon::run_daemon_command(args),
-        CommandKind::Mcp(_) => bail!("mcp commands must run through the MCP stdio entrypoint"),
-    }
+pub(crate) fn run(cli: Cli) -> Result<()> {
+    let output = match cli.command {
+        // MCP owns stdout for its protocol stream, so it never prints a CLI result.
+        CommandKind::Mcp(args) => return mcp::run_mcp_command(args),
+        CommandKind::Doctor(args) => run_doctor(args.workspace)?,
+        CommandKind::Goto(args) => run_goto(args)?,
+        CommandKind::Usages(args) => run_usages(args)?,
+        CommandKind::FindSymbol(args) => run_find_symbol(args)?,
+        CommandKind::Inspect(args) => run_inspect(args)?,
+        CommandKind::Outline(args) => run_outline(args)?,
+        CommandKind::Daemon(args) => {
+            daemon::run_daemon_command(&workspace_root(args.workspace, None)?, args.command)?
+        }
+    };
+    println!("{output}");
+    Ok(())
 }
 
-fn run_doctor(workspace_override: Option<PathBuf>) -> Result<String> {
-    let cwd = env::current_dir().context("failed to determine current directory")?;
-    let workspace_root = resolve_workspace_root(workspace_override.as_deref(), None, &cwd)?;
-    let adapter = daemon::adapter_status_with_daemon(&workspace_root)?;
-    let ty_found = adapter["ty"]["found"].as_bool().unwrap_or(false);
-    let ruff_found = adapter["ruff"]["found"].as_bool().unwrap_or(false);
-    let daemon_running = adapter["daemon"]["running"].as_bool().unwrap_or(false);
+fn run_doctor(workspace: Option<PathBuf>) -> Result<String> {
+    let workspace_root = workspace_root(workspace, None)?;
+    let ty = locate_ty_binary(&workspace_root).ok();
+    let ruff = locate_ruff_binary(&workspace_root).ok();
+    let daemon_pid = daemon::daemon_status(&workspace_root)?.pid;
 
-    let ty_line = if ty_found {
-        format!(
-            "ty: found at {}",
-            adapter["ty"]["path"].as_str().unwrap_or("<unknown>")
-        )
-    } else {
-        "ty: not found".to_string()
+    let tool_line = |name: &str, path: &Option<PathBuf>| match path {
+        Some(path) => format!("{name}: found at {}", path.display()),
+        None => format!("{name}: not found"),
     };
-    let ruff_line = if ruff_found {
-        format!(
-            "ruff: found at {}",
-            adapter["ruff"]["path"].as_str().unwrap_or("<unknown>")
-        )
-    } else {
-        "ruff: not found".to_string()
-    };
-    let daemon_line = if daemon_running {
-        format!(
-            "daemon: running (pid {})",
-            adapter["daemon"]["pid"]
-                .as_u64()
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-        )
-    } else {
-        "daemon: not running".to_string()
+    let daemon_line = match daemon_pid {
+        Some(pid) => format!("daemon: running (pid {pid})"),
+        None => "daemon: not running".to_string(),
     };
 
     Ok(format!(
         "summary: {}\nversion: {}\n{}\n{}\n{}",
-        doctor_summary(ty_found, ruff_found, daemon_running),
+        doctor_summary(ty.is_some(), ruff.is_some(), daemon_pid.is_some()),
         env!("CARGO_PKG_VERSION"),
-        ty_line,
-        ruff_line,
+        tool_line("ty", &ty),
+        tool_line("ruff", &ruff),
         daemon_line
     ))
 }
@@ -85,10 +72,8 @@ fn doctor_summary(ty_found: bool, ruff_found: bool, daemon_running: bool) -> Str
 }
 
 fn run_goto(args: GotoArgs) -> Result<String> {
-    let workspace_override = args.common.workspace;
-    let limit = args.common.limit;
     let input = CommandInput::from_position_args(args.position)?;
-    let workspace_root = resolve_workspace_for_file(workspace_override, &input.file)?;
+    let workspace_root = workspace_root(args.common.workspace, Some(&input.file))?;
 
     daemon::run_via_daemon(
         &workspace_root,
@@ -97,16 +82,14 @@ fn run_goto(args: GotoArgs) -> Result<String> {
             line: input.line,
             column: input.column,
             target: args.kind,
-            limit,
+            limit: args.common.limit,
         },
     )
 }
 
 fn run_usages(args: UsagesArgs) -> Result<String> {
-    let workspace_override = args.common.workspace;
-    let limit = args.common.limit;
     let input = CommandInput::from_position_args(args.position)?;
-    let workspace_root = resolve_workspace_for_file(workspace_override, &input.file)?;
+    let workspace_root = workspace_root(args.common.workspace, Some(&input.file))?;
 
     daemon::run_via_daemon(
         &workspace_root,
@@ -115,31 +98,27 @@ fn run_usages(args: UsagesArgs) -> Result<String> {
             line: input.line,
             column: input.column,
             include_declaration: !args.exclude_declaration,
-            limit,
+            limit: args.common.limit,
         },
     )
 }
 
 fn run_find_symbol(args: WorkspaceSymbolArgs) -> Result<String> {
-    let workspace_override = args.common.workspace;
-    let limit = args.common.limit;
-    let cwd = env::current_dir().context("failed to determine current directory")?;
-    let workspace_root = resolve_workspace_root(workspace_override.as_deref(), None, &cwd)?;
+    let workspace_root = workspace_root(args.common.workspace, None)?;
 
     daemon::run_via_daemon(
         &workspace_root,
         DaemonRequest::FindSymbol {
             query: args.query,
             kind: args.kind,
-            limit,
+            limit: args.common.limit,
         },
     )
 }
 
 fn run_inspect(args: InspectArgs) -> Result<String> {
-    let workspace_override = args.common.workspace;
     let input = CommandInput::from_position_args(args.position)?;
-    let workspace_root = resolve_workspace_for_file(workspace_override, &input.file)?;
+    let workspace_root = workspace_root(args.common.workspace, Some(&input.file))?;
 
     daemon::run_via_daemon(
         &workspace_root,
@@ -152,34 +131,21 @@ fn run_inspect(args: InspectArgs) -> Result<String> {
 }
 
 fn run_outline(args: OutlineArgs) -> Result<String> {
-    if args.full && args.depth.is_some() {
-        anyhow::bail!("--depth cannot be combined with --full");
-    }
-
-    let workspace_override = args.common.workspace;
-    let limit = args.common.limit;
-    let input = CommandInput::from_file_args(FileArgs { file: args.file })?;
-    let workspace_root = resolve_workspace_for_file(workspace_override, &input.file)?;
-    let depth = if args.full {
-        None
-    } else {
-        Some(args.depth.unwrap_or(2))
-    };
+    let file = canonicalize_path(&args.file)?;
+    let workspace_root = workspace_root(args.common.workspace, Some(&file))?;
 
     daemon::run_via_daemon(
         &workspace_root,
         DaemonRequest::Outline {
-            file: input.file,
-            depth,
-            limit,
+            file,
+            depth: outline_depth(args.depth, args.full),
+            limit: args.common.limit,
         },
     )
 }
 
-fn resolve_workspace_for_file(
-    workspace_override: Option<PathBuf>,
-    file: &std::path::Path,
-) -> Result<PathBuf> {
+/// Resolve the workspace root from an explicit override, a target file, or the current directory.
+fn workspace_root(workspace_override: Option<PathBuf>, file: Option<&Path>) -> Result<PathBuf> {
     let cwd = env::current_dir().context("failed to determine current directory")?;
-    resolve_workspace_root(workspace_override.as_deref(), Some(file), &cwd)
+    resolve_workspace_root(workspace_override.as_deref(), file, &cwd)
 }

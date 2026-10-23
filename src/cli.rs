@@ -92,13 +92,6 @@ pub(crate) struct PositionArgs {
 }
 
 #[derive(Args, Debug)]
-pub(crate) struct FileArgs {
-    /// File to inspect.
-    #[arg(value_name = "FILE")]
-    pub(crate) file: PathBuf,
-}
-
-#[derive(Args, Debug)]
 pub(crate) struct WorkspaceSymbolArgs {
     #[command(flatten)]
     pub(crate) common: WorkspaceLimitArgs,
@@ -126,7 +119,7 @@ pub(crate) struct OutlineArgs {
     #[arg(value_name = "FILE")]
     pub(crate) file: PathBuf,
     /// Limit nesting depth in the rendered outline.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "full")]
     pub(crate) depth: Option<usize>,
     /// Show the full document symbol tree without pruning.
     #[arg(long)]
@@ -175,14 +168,13 @@ impl CommandInput {
             column,
         })
     }
+}
 
-    pub(crate) fn from_file_args(args: FileArgs) -> Result<Self> {
-        Ok(Self {
-            file: canonicalize_path(&args.file)?,
-            line: 1,
-            column: 1,
-        })
-    }
+pub(crate) const DEFAULT_OUTLINE_DEPTH: usize = 2;
+
+/// Resolve the requested outline depth, where `None` means the full tree.
+pub(crate) fn outline_depth(depth: Option<usize>, full: bool) -> Option<usize> {
+    (!full).then(|| depth.unwrap_or(DEFAULT_OUTLINE_DEPTH))
 }
 
 /// Parse a `file:line:column` string, splitting from the right to preserve colons in paths.
@@ -212,11 +204,12 @@ pub(crate) enum SymbolKindFilter {
 }
 
 impl SymbolKindFilter {
-    pub(crate) fn matches(self, kind: u64) -> bool {
+    /// Return the LSP `SymbolKind` value this filter selects.
+    pub(crate) fn lsp_kind(self) -> u64 {
         match self {
-            Self::Class => kind == 5,
-            Self::Function => kind == 12,
-            Self::Method => kind == 6,
+            Self::Class => 5,
+            Self::Method => 6,
+            Self::Function => 12,
         }
     }
 }
@@ -248,6 +241,13 @@ mod tests {
         ] {
             Cli::try_parse_from(args).unwrap();
         }
+    }
+
+    #[test]
+    fn outline_rejects_depth_with_full() {
+        assert!(
+            Cli::try_parse_from(["lspyx", "outline", "a.py", "--full", "--depth", "1"]).is_err()
+        );
     }
 
     #[test]

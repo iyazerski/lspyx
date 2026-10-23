@@ -1,25 +1,23 @@
 mod diagnostics;
 mod explore;
-mod paths;
 mod rename;
 
-use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use rmcp::{
-    ErrorData, RoleServer, ServerHandler, ServiceExt,
+    ErrorData, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{
-        CallToolResult, ClientJsonRpcMessage, ClientNotification, ClientRequest, ContentBlock,
-        ErrorCode, ServerCapabilities, ServerInfo, ServerJsonRpcMessage,
-    },
-    service::{RxJsonRpcMessage, TxJsonRpcMessage},
+    model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig},
     tool, tool_handler, tool_router,
-    transport::{Transport, async_rw::AsyncRwTransport, stdio},
+    transport::stdio,
 };
 
 use self::diagnostics::DiagnosticsRequest;
 use self::explore::ExploreRequest;
 use self::rename::RenameRequest;
+use crate::workspace::canonicalize_path;
 
 const SERVER_INSTRUCTIONS: &str = "\
 LSPYX provides agent-friendly Python LSP navigation and diagnostics. Use it \
@@ -68,8 +66,8 @@ impl LspyxMcp {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for LspyxMcp {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(SERVER_INSTRUCTIONS)
     }
 }
@@ -83,11 +81,10 @@ impl LspyxMcp {
         &self,
         Parameters(request): Parameters<ExploreRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let prepared = explore::prepare(request)
-            .map_err(|error| ErrorData::invalid_params(format!("{error:#}"), None))?;
+        let prepared = explore::prepare(request).map_err(invalid_params)?;
         Ok(match explore::execute(prepared) {
             Ok(output) => CallToolResult::success(vec![ContentBlock::text(output)]),
-            Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))]),
+            Err(error) => tool_error(&error),
         })
     }
 
@@ -98,8 +95,7 @@ impl LspyxMcp {
         &self,
         Parameters(request): Parameters<DiagnosticsRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let prepared = diagnostics::prepare(request)
-            .map_err(|error| ErrorData::invalid_params(format!("{error:#}"), None))?;
+        let prepared = diagnostics::prepare(request).map_err(invalid_params)?;
         diagnostics::execute(prepared)
     }
 
@@ -110,8 +106,7 @@ impl LspyxMcp {
         &self,
         Parameters(request): Parameters<RenameRequest>,
     ) -> Result<CallToolResult, ErrorData> {
-        let prepared = rename::prepare(request)
-            .map_err(|error| ErrorData::invalid_params(format!("{error:#}"), None))?;
+        let prepared = rename::prepare(request).map_err(invalid_params)?;
         Ok(match rename::execute(prepared) {
             Ok(response) => {
                 let mut result = CallToolResult::success(vec![ContentBlock::text(
@@ -120,9 +115,30 @@ impl LspyxMcp {
                 result.structured_content = response.payload;
                 result
             }
-            Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))]),
+            Err(error) => tool_error(&error),
         })
     }
+}
+
+/// Map a request validation failure to an MCP invalid-params protocol error.
+fn invalid_params(error: anyhow::Error) -> ErrorData {
+    ErrorData::invalid_params(format!("{error:#}"), None)
+}
+
+/// Report an execution failure as a tool-level error result visible to the agent.
+fn tool_error(error: &anyhow::Error) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))])
+}
+
+/// Resolve a tool file argument, joining relative paths onto the workspace.
+fn resolve_file(file: &Path, workspace: Option<&Path>) -> Result<PathBuf> {
+    if file.is_absolute() {
+        return canonicalize_path(file);
+    }
+    let Some(workspace) = workspace else {
+        bail!("workspace is required when file is relative");
+    };
+    canonicalize_path(&workspace.join(file))
 }
 
 pub(crate) fn run_mcp_command(args: McpArgs) -> Result<()> {
@@ -135,84 +151,13 @@ pub(crate) fn run_mcp_command(args: McpArgs) -> Result<()> {
 }
 
 async fn serve_mcp() -> Result<()> {
-    let (stdin, stdout) = stdio();
-    let transport = PreInitTransport::new(AsyncRwTransport::new_server(stdin, stdout));
+    // rmcp answers pings and rejects other pre-initialize requests without closing the session.
     let service = LspyxMcp::new()
-        .serve(transport)
+        .serve(stdio())
         .await
         .context("failed to initialize MCP server")?;
     service.waiting().await.context("MCP server failed")?;
     Ok(())
-}
-
-struct PreInitTransport<T> {
-    inner: T,
-    initialized: bool,
-}
-
-impl<T> PreInitTransport<T> {
-    fn new(inner: T) -> Self {
-        Self {
-            inner,
-            initialized: false,
-        }
-    }
-}
-
-impl<T> Transport<RoleServer> for PreInitTransport<T>
-where
-    T: Transport<RoleServer>,
-{
-    type Error = T::Error;
-
-    fn send(
-        &mut self,
-        item: TxJsonRpcMessage<RoleServer>,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-        self.inner.send(item)
-    }
-
-    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleServer>> {
-        loop {
-            let message = self.inner.receive().await?;
-            if self.initialized {
-                return Some(message);
-            }
-
-            match message {
-                ClientJsonRpcMessage::Request(request)
-                    if matches!(&request.request, ClientRequest::InitializeRequest(_)) =>
-                {
-                    self.initialized = true;
-                    return Some(ClientJsonRpcMessage::Request(request));
-                }
-                ClientJsonRpcMessage::Request(request)
-                    if matches!(&request.request, ClientRequest::CustomRequest(_)) =>
-                {
-                    let error =
-                        ErrorData::new(ErrorCode::METHOD_NOT_FOUND, "Method not found", None);
-                    if self
-                        .inner
-                        .send(ServerJsonRpcMessage::error(error, Some(request.id)))
-                        .await
-                        .is_err()
-                    {
-                        return None;
-                    }
-                }
-                ClientJsonRpcMessage::Notification(notification)
-                    if matches!(
-                        notification.notification,
-                        ClientNotification::CustomNotification(_)
-                    ) => {}
-                other => return Some(other),
-            }
-        }
-    }
-
-    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        self.inner.close()
-    }
 }
 
 #[cfg(test)]

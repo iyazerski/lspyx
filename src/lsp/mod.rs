@@ -2,16 +2,17 @@ pub(crate) mod model;
 pub(crate) mod parse;
 pub(crate) mod rename;
 
-use std::env;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use url::Url;
 
+use crate::daemon::debug_enabled;
 use crate::workspace::ty_server_configuration;
 
 pub(crate) struct LspSession {
@@ -23,7 +24,7 @@ pub(crate) struct LspSession {
 
 impl LspSession {
     pub(crate) fn start(binary: &Path, workspace_root: &Path) -> Result<Self> {
-        let stderr = if env::var_os("LSPYX_DEBUG").is_some() {
+        let stderr = if debug_enabled() {
             Stdio::inherit()
         } else {
             Stdio::null()
@@ -55,7 +56,7 @@ impl LspSession {
     fn initialize(&mut self, workspace_root: &Path) -> Result<()> {
         let workspace_uri = path_to_file_uri(workspace_root)?;
         let ty_configuration = ty_server_configuration(workspace_root)?;
-        let response = self.request_internal(
+        let response = self.request(
             "initialize",
             json!({
                 "processId": null,
@@ -140,10 +141,6 @@ impl LspSession {
     }
 
     pub(crate) fn request(&mut self, method: &str, params: Value) -> Result<Value> {
-        self.request_internal(method, params)
-    }
-
-    fn request_internal(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -156,20 +153,24 @@ impl LspSession {
         self.write_message(&payload)?;
 
         loop {
-            let message = self.read_message()?;
+            let mut message = self.read_message()?;
 
-            // Ignore notifications and only return the response that matches our request.
-            if let Some(message_id) = message.get("id").and_then(Value::as_i64) {
-                if message_id != id {
-                    continue;
-                }
-
-                if let Some(error) = message.get("error") {
-                    return Err(anyhow!("LSP request {method} failed: {error}"));
-                }
-
-                return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+            // Skip notifications and server-to-client requests, which carry a `method`
+            // and may reuse ids from their own sequence.
+            if message.get("method").is_some()
+                || message.get("id").and_then(Value::as_i64) != Some(id)
+            {
+                continue;
             }
+
+            if let Some(error) = message.get("error") {
+                return Err(anyhow!("LSP request {method} failed: {error}"));
+            }
+
+            return Ok(message
+                .get_mut("result")
+                .map(Value::take)
+                .unwrap_or(Value::Null));
         }
     }
 
@@ -183,7 +184,7 @@ impl LspSession {
     }
 
     pub(crate) fn shutdown(&mut self) -> Result<()> {
-        let _ = self.request_internal("shutdown", json!(null));
+        let _ = self.request("shutdown", json!(null));
         let _ = self.notify("exit", json!(null));
         let _ = self.child.wait();
         Ok(())
@@ -199,9 +200,10 @@ impl LspSession {
 
     fn read_message(&mut self) -> Result<Value> {
         let mut content_length = None;
+        let mut line = String::new();
 
         loop {
-            let mut line = String::new();
+            line.clear();
             let read = self.stdout.read_line(&mut line)?;
             if read == 0 {
                 bail!("LSP server closed stdout unexpectedly");
@@ -230,20 +232,26 @@ pub(crate) fn path_to_file_uri(path: &Path) -> Result<String> {
         .map(|value| value.to_string())
 }
 
-pub(crate) fn read_line_text(path: &Path, line_number: usize) -> Result<String> {
-    let text =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+/// Read trimmed source lines for snippets, loading each file at most once.
+#[derive(Default)]
+pub(crate) struct SnippetReader {
+    files: HashMap<PathBuf, Option<String>>,
+}
 
-    text.lines()
-        .nth(line_number.saturating_sub(1))
-        .map(ToString::to_string)
-        .ok_or_else(|| {
-            anyhow!(
-                "line {} is out of range for {}",
-                line_number,
-                path.display()
-            )
-        })
+impl SnippetReader {
+    /// Return the trimmed 1-based `line` of `path`, or `None` when it cannot be read.
+    pub(crate) fn snippet(&mut self, path: &Path, line: usize) -> Option<String> {
+        let text = self
+            .files
+            .entry(path.to_path_buf())
+            .or_insert_with(|| fs::read_to_string(path).ok());
+        nth_line(text.as_deref()?, line).map(|value| value.trim().to_string())
+    }
+}
+
+/// Return the 1-based `line_number` of `text`.
+pub(crate) fn nth_line(text: &str, line_number: usize) -> Option<&str> {
+    text.lines().nth(line_number.saturating_sub(1))
 }
 
 pub(crate) fn column_to_utf16_offset(line_text: &str, column_number: usize) -> Result<usize> {
@@ -251,17 +259,21 @@ pub(crate) fn column_to_utf16_offset(line_text: &str, column_number: usize) -> R
         bail!("column must be 1-based");
     }
 
-    let scalar_count = line_text.chars().count();
-    if column_number > scalar_count + 1 {
+    let mut characters = 0;
+    let mut offset = 0;
+    for character in line_text.chars().take(column_number - 1) {
+        characters += 1;
+        offset += character.len_utf16();
+    }
+    if characters < column_number - 1 {
         bail!(
             "column {} is out of range for line of length {}",
             column_number,
-            scalar_count
+            characters
         );
     }
 
-    let prefix: String = line_text.chars().take(column_number - 1).collect();
-    Ok(prefix.encode_utf16().count())
+    Ok(offset)
 }
 
 #[cfg(test)]

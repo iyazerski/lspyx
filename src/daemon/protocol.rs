@@ -18,6 +18,28 @@ pub(crate) struct DaemonWireResponse {
     pub(crate) error: Option<String>,
 }
 
+impl DaemonWireResponse {
+    /// Build a successful response with rendered text and an optional structured payload.
+    pub(crate) fn success(text: String, payload: Option<Value>) -> Self {
+        Self {
+            ok: true,
+            payload,
+            text: Some(text),
+            error: None,
+        }
+    }
+
+    /// Build a failed response carrying the full error chain.
+    pub(crate) fn failure(error: &anyhow::Error) -> Self {
+        Self {
+            ok: false,
+            payload: None,
+            text: None,
+            error: Some(format!("{error:#}")),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "kebab-case")]
 pub(crate) enum DaemonRequest {
@@ -47,6 +69,13 @@ pub(crate) enum DaemonRequest {
         line: usize,
         column: usize,
     },
+    /// Inspect a position and, when it names a symbol, add its definition and usages.
+    Explore {
+        file: PathBuf,
+        line: usize,
+        column: usize,
+        limit: Option<usize>,
+    },
     Outline {
         file: PathBuf,
         depth: Option<usize>,
@@ -64,10 +93,6 @@ pub(super) fn send_request(
     socket_path: &Path,
     request: &DaemonRequest,
 ) -> Result<Option<DaemonWireResponse>> {
-    if !socket_path.exists() {
-        return Ok(None);
-    }
-
     let mut stream = match UnixStream::connect(socket_path) {
         Ok(stream) => stream,
         Err(error)
@@ -88,8 +113,7 @@ pub(super) fn send_request(
         }
     };
 
-    let body = serde_json::to_vec(request)?;
-    write_frame(&mut stream, body.as_slice())?;
+    write_frame(&mut stream, request)?;
     stream.shutdown(Shutdown::Write)?;
 
     let response_body = match read_frame(&mut stream) {
@@ -106,11 +130,6 @@ pub(super) fn read_request(stream: &mut UnixStream) -> Result<DaemonRequest> {
     serde_json::from_slice(&body).context("failed to parse daemon request")
 }
 
-pub(super) fn write_response(stream: &mut UnixStream, response: &DaemonWireResponse) -> Result<()> {
-    let body = serde_json::to_vec(response)?;
-    write_frame(stream, body.as_slice())
-}
-
 fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>> {
     let mut length_bytes = [0_u8; 8];
     stream.read_exact(&mut length_bytes)?;
@@ -122,11 +141,14 @@ fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>> {
     Ok(body)
 }
 
-fn write_frame(stream: &mut UnixStream, body: &[u8]) -> Result<()> {
-    let length = u64::try_from(body.len()).context("daemon frame length exceeded u64")?;
-    stream.write_all(&length.to_be_bytes())?;
-    stream.write_all(body)?;
-    stream.flush()?;
+/// Write `value` as JSON behind a big-endian u64 length prefix in a single write.
+pub(super) fn write_frame(stream: &mut UnixStream, value: &impl Serialize) -> Result<()> {
+    // Serialize behind a placeholder prefix so the body is never copied.
+    let mut frame = vec![0_u8; 8];
+    serde_json::to_writer(&mut frame, value)?;
+    let length = u64::try_from(frame.len() - 8).context("daemon frame length exceeded u64")?;
+    frame[..8].copy_from_slice(&length.to_be_bytes());
+    stream.write_all(&frame)?;
     Ok(())
 }
 

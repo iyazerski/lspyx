@@ -1,53 +1,44 @@
-use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use similar::TextDiff;
 
 use crate::lsp::model::{PositionRecord, RenameEditRecord, display_path};
 
-/// Build a complete unified diff from validated semantic rename edits.
+/// Build a complete unified diff from validated semantic rename edits sorted by file.
 pub(crate) fn build_rename_diff(
     workspace_root: &Path,
     old_name: &str,
     edits: &[RenameEditRecord],
 ) -> Result<String> {
-    let mut edits_by_file = BTreeMap::<PathBuf, Vec<&RenameEditRecord>>::new();
-    for edit in edits {
-        edits_by_file
-            .entry(edit.file.clone())
-            .or_default()
-            .push(edit);
-    }
-
-    let mut patches = Vec::new();
-    for (file, file_edits) in edits_by_file {
-        let original = fs::read_to_string(&file)
+    let mut diff = String::new();
+    for file_edits in edits.chunk_by(|left, right| left.file == right.file) {
+        let file = &file_edits[0].file;
+        let original = fs::read_to_string(file)
             .with_context(|| format!("failed to read rename target {}", file.display()))?;
-        let updated = apply_rename_edits(&original, old_name, &file, file_edits)?;
-        let relative = display_path(workspace_root, &file);
-        let old_header = format!("a/{relative}");
-        let new_header = format!("b/{relative}");
-        let patch = TextDiff::from_lines(&original, &updated)
-            .unified_diff()
-            .context_radius(3)
-            .header(&old_header, &new_header)
-            .to_string();
-        patches.push(patch);
+        let updated = apply_rename_edits(&original, old_name, file, file_edits)?;
+        let relative = display_path(workspace_root, file);
+        diff.push_str(
+            &TextDiff::from_lines(&original, &updated)
+                .unified_diff()
+                .context_radius(3)
+                .header(&format!("a/{relative}"), &format!("b/{relative}"))
+                .to_string(),
+        );
     }
 
-    Ok(patches.join(""))
+    Ok(diff)
 }
 
 fn apply_rename_edits(
     original: &str,
     old_name: &str,
     file: &Path,
-    edits: Vec<&RenameEditRecord>,
+    edits: &[RenameEditRecord],
 ) -> Result<String> {
     let mut ranges = edits
-        .into_iter()
+        .iter()
         .map(|edit| {
             let start = position_to_byte_offset(original, &edit.range.start)?;
             let end = position_to_byte_offset(original, &edit.range.end)?;
@@ -135,13 +126,8 @@ mod tests {
             edit(1, 14, 18, "Conversation"),
         ];
 
-        let updated = apply_rename_edits(
-            original,
-            "Chat",
-            Path::new("example.py"),
-            edits.iter().collect(),
-        )
-        .unwrap();
+        let updated =
+            apply_rename_edits(original, "Chat", Path::new("example.py"), &edits).unwrap();
 
         assert_eq!(updated, "value = Conversation(Conversation.id)\n");
     }
@@ -165,13 +151,8 @@ mod tests {
     fn rejects_stale_edits() {
         let edits = [edit(1, 1, 5, "Conversation")];
 
-        let error = apply_rename_edits(
-            "User = 1\n",
-            "Chat",
-            Path::new("example.py"),
-            edits.iter().collect(),
-        )
-        .unwrap_err();
+        let error =
+            apply_rename_edits("User = 1\n", "Chat", Path::new("example.py"), &edits).unwrap_err();
 
         assert!(
             error

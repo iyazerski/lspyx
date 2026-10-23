@@ -85,10 +85,11 @@ pub(super) fn execute(prepared: PreparedDiagnostics) -> Result<CallToolResult, E
     let structured = serde_json::to_value(&output).map_err(|error| {
         ErrorData::internal_error(format!("failed to serialize diagnostics: {error}"), None)
     })?;
+    let content = vec![ContentBlock::text(rendered)];
     let mut result = if output.all_tools_failed() {
-        CallToolResult::error(vec![ContentBlock::text(rendered)])
+        CallToolResult::error(content)
     } else {
-        CallToolResult::success(vec![ContentBlock::text(rendered)])
+        CallToolResult::success(content)
     };
     result.structured_content = Some(structured);
     Ok(result)

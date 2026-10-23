@@ -1,7 +1,6 @@
-use std::collections::hash_map::DefaultHasher;
-use std::env;
+mod parser;
+
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
@@ -11,11 +10,11 @@ use serde::Serialize;
 
 use self::parser::{parse_ruff_output, parse_ty_output};
 use crate::lsp::model::display_path;
-use crate::workspace::{locate_ruff_binary, locate_ty_binary};
+use crate::workspace::{cache_dir, locate_ruff_binary, locate_ty_binary, workspace_cache_key};
 
 pub(crate) const DEFAULT_DIAGNOSTIC_LIMIT: usize = 100;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct DiagnosticsOutput {
     pub(crate) complete: bool,
     pub(crate) workspace_root: PathBuf,
@@ -34,13 +33,13 @@ impl DiagnosticsOutput {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct DiagnosticToolReports {
     pub(crate) ruff: DiagnosticToolReport,
     pub(crate) ty: DiagnosticToolReport,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct DiagnosticToolReport {
     pub(crate) status: DiagnosticToolStatus,
     pub(crate) count: usize,
@@ -57,7 +56,7 @@ pub(crate) enum DiagnosticToolStatus {
     Error,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[derive(Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct DiagnosticRecord {
     pub(crate) source: DiagnosticSource,
     pub(crate) code: String,
@@ -87,13 +86,13 @@ impl DiagnosticSource {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub(crate) struct DiagnosticPosition {
     pub(crate) line: usize,
     pub(crate) column: usize,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[derive(Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct DiagnosticFix {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) applicability: Option<String>,
@@ -113,19 +112,17 @@ pub(crate) fn run_diagnostics(
     limit: usize,
 ) -> DiagnosticsOutput {
     let (ruff_run, ty_run) = thread::scope(|scope| {
-        let ruff = scope.spawn(|| run_ruff(workspace_root, target));
-        let ty = scope.spawn(|| run_ty(workspace_root, target));
+        let ruff =
+            scope.spawn(|| run_tool(locate_ruff_binary, execute_ruff, workspace_root, target));
+        let ty = scope.spawn(|| run_tool(locate_ty_binary, execute_ty, workspace_root, target));
+        let joined = |tool: &str, run: thread::Result<ToolRun>| {
+            run.unwrap_or_else(|_| ToolRun {
+                binary: None,
+                result: Err(anyhow!("{tool} diagnostics worker panicked")),
+            })
+        };
 
-        (
-            ruff.join().unwrap_or_else(|_| ToolRun {
-                binary: None,
-                result: Err(anyhow!("ruff diagnostics worker panicked")),
-            }),
-            ty.join().unwrap_or_else(|_| ToolRun {
-                binary: None,
-                result: Err(anyhow!("ty diagnostics worker panicked")),
-            }),
-        )
+        (joined("ruff", ruff.join()), joined("ty", ty.join()))
     });
 
     build_output(workspace_root, target, limit, ruff_run, ty_run)
@@ -187,39 +184,22 @@ pub(crate) fn render_diagnostics(output: &DiagnosticsOutput) -> String {
     lines.join("\n")
 }
 
-fn run_ruff(workspace_root: &Path, target: &Path) -> ToolRun {
-    let binary = match locate_ruff_binary(workspace_root) {
-        Ok(binary) => binary,
-        Err(error) => {
-            return ToolRun {
-                binary: None,
-                result: Err(error),
-            };
-        }
-    };
-
-    let result = execute_ruff(&binary, workspace_root, target);
-    ToolRun {
-        binary: Some(binary),
-        result,
-    }
-}
-
-fn run_ty(workspace_root: &Path, target: &Path) -> ToolRun {
-    let binary = match locate_ty_binary(workspace_root) {
-        Ok(binary) => binary,
-        Err(error) => {
-            return ToolRun {
-                binary: None,
-                result: Err(error),
-            };
-        }
-    };
-
-    let result = execute_ty(&binary, workspace_root, target);
-    ToolRun {
-        binary: Some(binary),
-        result,
+/// Locate a diagnostics tool and run it, keeping the binary path for reporting.
+fn run_tool(
+    locate: fn(&Path) -> Result<PathBuf>,
+    execute: fn(&Path, &Path, &Path) -> Result<Vec<DiagnosticRecord>>,
+    workspace_root: &Path,
+    target: &Path,
+) -> ToolRun {
+    match locate(workspace_root) {
+        Ok(binary) => ToolRun {
+            result: execute(&binary, workspace_root, target),
+            binary: Some(binary),
+        },
+        Err(error) => ToolRun {
+            binary: None,
+            result: Err(error),
+        },
     }
 }
 
@@ -296,32 +276,25 @@ fn build_output(
     ruff_run: ToolRun,
     ty_run: ToolRun,
 ) -> DiagnosticsOutput {
-    let (ruff_report, mut ruff_diagnostics) = tool_report(ruff_run);
+    let (ruff_report, ruff_diagnostics) = tool_report(ruff_run);
     let (ty_report, mut ty_diagnostics) = tool_report(ty_run);
     let complete = ruff_report.status == DiagnosticToolStatus::Ok
         && ty_report.status == DiagnosticToolStatus::Ok;
 
-    ruff_diagnostics.append(&mut ty_diagnostics);
-    ruff_diagnostics.sort_by(|left, right| {
-        (
-            &left.file,
-            left.start.line,
-            left.start.column,
-            left.source,
-            &left.code,
-        )
-            .cmp(&(
-                &right.file,
-                right.start.line,
-                right.start.column,
-                right.source,
-                &right.code,
-            ))
+    let mut diagnostics = ruff_diagnostics;
+    diagnostics.append(&mut ty_diagnostics);
+    diagnostics.sort_by(|left, right| {
+        (&left.file, left.start, left.source, &left.code).cmp(&(
+            &right.file,
+            right.start,
+            right.source,
+            &right.code,
+        ))
     });
 
-    let total = ruff_diagnostics.len();
-    ruff_diagnostics.truncate(limit);
-    let shown = ruff_diagnostics.len();
+    let total = diagnostics.len();
+    diagnostics.truncate(limit);
+    let shown = diagnostics.len();
 
     DiagnosticsOutput {
         complete,
@@ -334,7 +307,7 @@ fn build_output(
             ruff: ruff_report,
             ty: ty_report,
         },
-        diagnostics: ruff_diagnostics,
+        diagnostics,
     }
 }
 
@@ -362,16 +335,12 @@ fn tool_report(run: ToolRun) -> (DiagnosticToolReport, Vec<DiagnosticRecord>) {
 }
 
 fn ruff_cache_dir(workspace_root: &Path) -> Result<Option<PathBuf>> {
-    let Some(home) = env::var_os("HOME") else {
+    let Some(cache_dir) = cache_dir() else {
         return Ok(None);
     };
-    let mut hasher = DefaultHasher::new();
-    workspace_root.hash(&mut hasher);
-    let cache_dir = PathBuf::from(home)
-        .join(".cache")
-        .join("lspyx")
+    let cache_dir = cache_dir
         .join("ruff")
-        .join(format!("{:016x}", hasher.finish()));
+        .join(workspace_cache_key(workspace_root));
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("failed to create Ruff cache {}", cache_dir.display()))?;
     Ok(Some(cache_dir))
@@ -384,13 +353,10 @@ fn compact_message(message: &str) -> String {
 fn compact_error(error: &str) -> String {
     const MAX_ERROR_CHARS: usize = 2_000;
     let compact = compact_message(error);
-    if compact.chars().count() <= MAX_ERROR_CHARS {
-        return compact;
+    match compact.char_indices().nth(MAX_ERROR_CHARS) {
+        Some((end, _)) => format!("{}...", &compact[..end]),
+        None => compact,
     }
-
-    let mut truncated = compact.chars().take(MAX_ERROR_CHARS).collect::<String>();
-    truncated.push_str("...");
-    truncated
 }
 
 #[cfg(test)]
@@ -504,4 +470,3 @@ mod tests {
         }
     }
 }
-mod parser;
