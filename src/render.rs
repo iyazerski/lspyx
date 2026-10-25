@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::cli::GotoTarget;
 use crate::lsp::model::{
     DocumentSymbolNode, LocationOutput, OutlineOutput, RenameOutput, ResolvedPosition,
-    SymbolAtOutput, WorkspaceSymbolOutput, display_path, symbol_kind_name,
+    SymbolAtOutput, WorkspaceSymbolOutput, display_path,
 };
 
 pub(crate) fn render_location_output(limit: Option<usize>, payload: &LocationOutput) -> String {
@@ -39,12 +39,7 @@ pub(crate) fn render_workspace_symbol_output(payload: &WorkspaceSymbolOutput) ->
 
     for (index, symbol) in payload.symbols.iter().enumerate() {
         let start = symbol.range.start;
-        results.push(format!(
-            "{}. {} [{}]",
-            index + 1,
-            symbol.name,
-            symbol_kind_name(symbol.kind)
-        ));
+        results.push(format!("{}. {} [{}]", index + 1, symbol.name, symbol.kind));
         results.push(format!(
             "   {}",
             format_position(
@@ -73,10 +68,7 @@ pub(crate) fn render_workspace_symbol_output(payload: &WorkspaceSymbolOutput) ->
     };
     let mut context = vec![sentence(format!("Query {:?}", payload.query))];
     if let Some(kind) = payload.kind {
-        context.push(format!(
-            "Filtered to {} symbols.",
-            symbol_kind_name(kind.lsp_kind())
-        ));
+        context.push(format!("Filtered to {} symbols.", kind.lsp_kind()));
     }
 
     join_sections([
@@ -100,14 +92,14 @@ pub(crate) fn render_symbol_at_output(payload: &SymbolAtOutput) -> String {
     };
 
     let resolved = format_resolved_position(workspace_root, position);
-    let summary = match symbol.kind.map(symbol_kind_name) {
+    let summary = match symbol.kind {
         Some(kind) => format!("{} is a {kind} at {resolved}", symbol.name),
         None => format!("{} is at {resolved}", symbol.name),
     };
 
     let mut details = Vec::new();
     if let Some(kind) = symbol.kind {
-        details.push(format!("Kind: {}", symbol_kind_name(kind)));
+        details.push(format!("Kind: {kind}"));
     }
     details.push(format!(
         "Range: columns {}-{}",
@@ -152,13 +144,10 @@ pub(crate) fn render_outline_output(limit: Option<usize>, payload: &OutlineOutpu
             )
         )
     };
-    let depth = payload
-        .depth
-        .map_or_else(|| "full".to_string(), |value| value.to_string());
     let context = format!(
         "{}\n{}",
         sentence(format!("File {display_file:?}")),
-        sentence(format!("Depth {depth}"))
+        sentence(format!("Depth {}", payload.depth))
     );
 
     let mut tree = Vec::new();
@@ -318,7 +307,7 @@ fn push_outline_tree(lines: &mut Vec<String>, symbol: &DocumentSymbolNode, inden
         "{}- {} [{}] @ {}:{}",
         "  ".repeat(indent),
         symbol.name,
-        symbol_kind_name(symbol.kind),
+        symbol.kind,
         symbol.range.start.line,
         symbol.range.start.column
     ));

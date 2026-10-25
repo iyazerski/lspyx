@@ -6,8 +6,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::resolve_file;
-use crate::cli::{SymbolKindFilter, outline_depth};
+use crate::cli::SymbolKindFilter;
 use crate::daemon::{self, DaemonRequest};
+use crate::file_position::FilePosition;
+use crate::lsp::model::OutlineDepth;
 use crate::workspace::resolve_workspace_root;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -42,13 +44,9 @@ pub(super) enum ExploreTarget {
     },
     Outline {
         file: PathBuf,
-        depth: Option<usize>,
+        depth: OutlineDepth,
     },
-    Position {
-        file: PathBuf,
-        line: usize,
-        column: usize,
-    },
+    Position(FilePosition),
 }
 
 #[derive(Debug)]
@@ -58,11 +56,13 @@ pub(super) struct PreparedExplore {
     pub(super) target: ExploreTarget,
 }
 
+/// Validate the request and resolve its file and workspace root.
 pub(super) fn prepare(request: ExploreRequest) -> Result<PreparedExplore> {
     let mut target = select_target(&request)?;
     let workspace = request.workspace.as_deref();
     let file = match &mut target {
-        ExploreTarget::Outline { file, .. } | ExploreTarget::Position { file, .. } => {
+        ExploreTarget::Outline { file, .. }
+        | ExploreTarget::Position(FilePosition { file, .. }) => {
             *file = resolve_file(file, workspace)?;
             Some(file.as_path())
         }
@@ -78,6 +78,7 @@ pub(super) fn prepare(request: ExploreRequest) -> Result<PreparedExplore> {
     })
 }
 
+/// Run the prepared exploration through the workspace daemon.
 pub(super) fn execute(prepared: PreparedExplore) -> Result<String> {
     let limit = prepared.limit;
     let request = match prepared.target {
@@ -85,12 +86,7 @@ pub(super) fn execute(prepared: PreparedExplore) -> Result<String> {
             DaemonRequest::FindSymbol { query, kind, limit }
         }
         ExploreTarget::Outline { file, depth } => DaemonRequest::Outline { file, depth, limit },
-        ExploreTarget::Position { file, line, column } => DaemonRequest::Explore {
-            file,
-            line,
-            column,
-            limit,
-        },
+        ExploreTarget::Position(position) => DaemonRequest::Explore { position, limit },
     };
     daemon::run_via_daemon(&prepared.workspace_root, request)
 }
@@ -126,27 +122,25 @@ pub(super) fn select_target(request: &ExploreRequest) -> Result<ExploreTarget> {
             if request.depth.is_some() && request.full {
                 bail!("depth cannot be combined with full");
             }
+            let depth = if request.full {
+                OutlineDepth::Full
+            } else {
+                request
+                    .depth
+                    .map_or_else(OutlineDepth::default, OutlineDepth::Limited)
+            };
             Ok(ExploreTarget::Outline {
                 file: file.clone(),
-                depth: outline_depth(request.depth, request.full),
+                depth,
             })
         }
         (Some(file), Some(line), Some(column)) => {
-            if line == 0 {
-                bail!("line must be a 1-based value");
-            }
-            if column == 0 {
-                bail!("column must be a 1-based value");
-            }
+            let position = FilePosition::new(file.clone(), line, column)?;
             reject_kind(request)?;
             if has_outline_options {
                 bail!("depth and full are only supported for file outlines");
             }
-            Ok(ExploreTarget::Position {
-                file: file.clone(),
-                line,
-                column,
-            })
+            Ok(ExploreTarget::Position(position))
         }
         (None, _, _) => bail!("line and column require file"),
         (Some(_), _, _) => bail!("line and column must be provided together"),

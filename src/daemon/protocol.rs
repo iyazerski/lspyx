@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -9,35 +9,43 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cli::{GotoTarget, SymbolKindFilter};
+use crate::file_position::FilePosition;
+use crate::lsp::model::OutlineDepth;
 
+/// A successful daemon reply: rendered text plus an optional structured payload.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct DaemonWireResponse {
-    pub(crate) ok: bool,
+pub(crate) struct DaemonReply {
+    pub(crate) text: String,
     pub(crate) payload: Option<Value>,
-    pub(crate) text: Option<String>,
-    pub(crate) error: Option<String>,
 }
 
-impl DaemonWireResponse {
-    /// Build a successful response with rendered text and an optional structured payload.
-    pub(crate) fn success(text: String, payload: Option<Value>) -> Self {
+impl DaemonReply {
+    /// Build a reply that carries only rendered text.
+    pub(crate) fn text(text: String) -> Self {
         Self {
-            ok: true,
-            payload,
-            text: Some(text),
-            error: None,
+            text,
+            payload: None,
         }
     }
 
-    /// Build a failed response carrying the full error chain.
-    pub(crate) fn failure(error: &anyhow::Error) -> Self {
+    /// Build a reply with rendered text and a structured payload.
+    pub(crate) fn with_payload(text: String, payload: Value) -> Self {
         Self {
-            ok: false,
-            payload: None,
-            text: None,
-            error: Some(format!("{error:#}")),
+            text,
+            payload: Some(payload),
         }
     }
+}
+
+/// A daemon response on the wire; failures carry the request's full error chain.
+pub(super) type DaemonResponse = Result<DaemonReply, String>;
+
+/// Whether a usages search includes the declaration site.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Declaration {
+    Include,
+    Exclude,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -46,17 +54,13 @@ pub(crate) enum DaemonRequest {
     Ping,
     Shutdown,
     Goto {
-        file: PathBuf,
-        line: usize,
-        column: usize,
+        position: FilePosition,
         target: GotoTarget,
         limit: Option<usize>,
     },
     Usages {
-        file: PathBuf,
-        line: usize,
-        column: usize,
-        include_declaration: bool,
+        position: FilePosition,
+        declaration: Declaration,
         limit: Option<usize>,
     },
     FindSymbol {
@@ -65,43 +69,45 @@ pub(crate) enum DaemonRequest {
         limit: Option<usize>,
     },
     Inspect {
-        file: PathBuf,
-        line: usize,
-        column: usize,
+        position: FilePosition,
     },
     /// Inspect a position and, when it names a symbol, add its definition and usages.
     Explore {
-        file: PathBuf,
-        line: usize,
-        column: usize,
+        position: FilePosition,
         limit: Option<usize>,
     },
     Outline {
         file: PathBuf,
-        depth: Option<usize>,
+        depth: OutlineDepth,
         limit: Option<usize>,
     },
     Rename {
-        file: PathBuf,
-        line: usize,
-        column: usize,
+        position: FilePosition,
         new_name: String,
     },
 }
 
+/// Send `request` to the daemon at `socket_path`.
+///
+/// Returns `None` when no daemon is listening or it hung up before replying; a stale
+/// socket file is removed in that case.
+///
+/// # Errors
+///
+/// Returns an error when the connection or the frame exchange fails unexpectedly.
 pub(super) fn send_request(
     socket_path: &Path,
     request: &DaemonRequest,
-) -> Result<Option<DaemonWireResponse>> {
+) -> Result<Option<DaemonResponse>> {
     let mut stream = match UnixStream::connect(socket_path) {
         Ok(stream) => stream,
         Err(error)
             if matches!(
                 error.kind(),
-                std::io::ErrorKind::NotFound
-                    | std::io::ErrorKind::ConnectionRefused
-                    | std::io::ErrorKind::ConnectionAborted
-                    | std::io::ErrorKind::ConnectionReset
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::ConnectionReset
             ) =>
         {
             let _ = fs::remove_file(socket_path);
@@ -154,6 +160,6 @@ pub(super) fn write_frame(stream: &mut UnixStream, value: &impl Serialize) -> Re
 
 fn is_unexpected_eof(error: &anyhow::Error) -> bool {
     error
-        .downcast_ref::<std::io::Error>()
-        .is_some_and(|source| source.kind() == std::io::ErrorKind::UnexpectedEof)
+        .downcast_ref::<io::Error>()
+        .is_some_and(|source| source.kind() == io::ErrorKind::UnexpectedEof)
 }

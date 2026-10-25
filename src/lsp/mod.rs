@@ -12,9 +12,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::daemon::debug_enabled;
+use crate::debug;
 use crate::workspace::ty_server_configuration;
 
+/// A JSON-RPC session with a `ty server` child process over stdio.
+#[derive(Debug)]
 pub(crate) struct LspSession {
     child: Child,
     stdin: BufWriter<ChildStdin>,
@@ -23,20 +25,19 @@ pub(crate) struct LspSession {
 }
 
 impl LspSession {
+    /// Spawn `binary server` in `workspace_root` and complete the LSP handshake.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the server cannot be started or rejects initialization.
     pub(crate) fn start(binary: &Path, workspace_root: &Path) -> Result<Self> {
-        let stderr = if debug_enabled() {
-            Stdio::inherit()
-        } else {
-            Stdio::null()
-        };
-
         let mut child = Command::new(binary)
             .arg("server")
             .current_dir(workspace_root)
             .env("RUST_LOG", "error")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(stderr)
+            .stderr(debug::child_stderr())
             .spawn()
             .with_context(|| format!("failed to start {}", binary.display()))?;
 
@@ -140,6 +141,11 @@ impl LspSession {
         )
     }
 
+    /// Send a request and wait for its result, skipping unrelated server messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on I/O failure or when the server answers with an LSP error.
     pub(crate) fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
@@ -183,11 +189,11 @@ impl LspSession {
         self.write_message(&payload)
     }
 
-    pub(crate) fn shutdown(&mut self) -> Result<()> {
+    /// Ask the server to exit and wait for it; teardown is best effort, so failures are ignored.
+    pub(crate) fn shutdown(mut self) {
         let _ = self.request("shutdown", json!(null));
         let _ = self.notify("exit", json!(null));
         let _ = self.child.wait();
-        Ok(())
     }
 
     fn write_message(&mut self, value: &Value) -> Result<()> {
@@ -233,7 +239,7 @@ pub(crate) fn path_to_file_uri(path: &Path) -> Result<String> {
 }
 
 /// Read trimmed source lines for snippets, loading each file at most once.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct SnippetReader {
     files: HashMap<PathBuf, Option<String>>,
 }
@@ -266,11 +272,7 @@ pub(crate) fn column_to_utf16_offset(line_text: &str, column_number: usize) -> R
         offset += character.len_utf16();
     }
     if characters < column_number - 1 {
-        bail!(
-            "column {} is out of range for line of length {}",
-            column_number,
-            characters
-        );
+        bail!("column {column_number} is out of range for line of length {characters}");
     }
 
     Ok(offset)

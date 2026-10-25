@@ -9,7 +9,7 @@ use url::Url;
 
 use crate::lsp::model::{
     DocumentSymbolNode, LocationRecord, PositionRecord, RangeRecord, RenameEditRecord,
-    SymbolAtRecord, WorkspaceSymbolRecord,
+    SymbolAtRecord, SymbolKind, WorkspaceSymbolRecord,
 };
 
 /// Zero-based LSP wire position, converted into a 1-based [`PositionRecord`].
@@ -56,7 +56,7 @@ struct LspUriRange {
 #[serde(rename_all = "camelCase")]
 struct LspSymbolInformation {
     name: String,
-    kind: u64,
+    kind: SymbolKind,
     container_name: Option<String>,
     location: LspUriRange,
 }
@@ -288,8 +288,7 @@ pub(crate) fn extract_symbol_at(
 
     if column_number == 0 || column_number > characters.len() + 1 {
         bail!(
-            "column {} is out of range for line of length {}",
-            column_number,
+            "column {column_number} is out of range for line of length {}",
             characters.len()
         );
     }

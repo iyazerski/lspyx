@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::daemon;
+use crate::daemon::{self, Declaration};
+use crate::file_position::FilePosition;
+use crate::lsp::model::{OutlineDepth, SymbolKind};
 use crate::mcp;
 use crate::workspace::canonicalize_path;
 
@@ -84,11 +86,35 @@ pub(crate) struct UsagesArgs {
     pub(crate) exclude_declaration: bool,
 }
 
+impl UsagesArgs {
+    /// Return whether usages should include the declaration site.
+    pub(crate) fn declaration(&self) -> Declaration {
+        if self.exclude_declaration {
+            Declaration::Exclude
+        } else {
+            Declaration::Include
+        }
+    }
+}
+
 #[derive(Args, Debug)]
 pub(crate) struct PositionArgs {
     /// File position as file:line:column (1-based).
     #[arg(value_name = "FILE:LINE:COLUMN")]
     pub(crate) location: String,
+}
+
+impl PositionArgs {
+    /// Parse the location and canonicalize its file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the location is malformed or the file cannot be resolved.
+    pub(crate) fn resolve(&self) -> Result<FilePosition> {
+        let mut position: FilePosition = self.location.parse()?;
+        position.file = canonicalize_path(&position.file)?;
+        Ok(position)
+    }
 }
 
 #[derive(Args, Debug)]
@@ -126,6 +152,18 @@ pub(crate) struct OutlineArgs {
     pub(crate) full: bool,
 }
 
+impl OutlineArgs {
+    /// Return the requested outline depth.
+    pub(crate) fn outline_depth(&self) -> OutlineDepth {
+        if self.full {
+            OutlineDepth::Full
+        } else {
+            self.depth
+                .map_or_else(OutlineDepth::default, OutlineDepth::Limited)
+        }
+    }
+}
+
 #[derive(Args, Debug)]
 pub(crate) struct WorkspaceArgs {
     /// Optional override for a different repo; omit in the current workspace.
@@ -143,58 +181,6 @@ pub(crate) struct WorkspaceLimitArgs {
     pub(crate) limit: Option<usize>,
 }
 
-#[derive(Debug)]
-pub(crate) struct CommandInput {
-    pub(crate) file: PathBuf,
-    pub(crate) line: usize,
-    pub(crate) column: usize,
-}
-
-impl CommandInput {
-    pub(crate) fn from_position_args(args: PositionArgs) -> Result<Self> {
-        let (file, line, column) = parse_colon_location(&args.location)?;
-
-        if line == 0 {
-            bail!("line must be a 1-based value");
-        }
-
-        if column == 0 {
-            bail!("column must be a 1-based value");
-        }
-
-        Ok(Self {
-            file: canonicalize_path(&file)?,
-            line,
-            column,
-        })
-    }
-}
-
-pub(crate) const DEFAULT_OUTLINE_DEPTH: usize = 2;
-
-/// Resolve the requested outline depth, where `None` means the full tree.
-pub(crate) fn outline_depth(depth: Option<usize>, full: bool) -> Option<usize> {
-    (!full).then(|| depth.unwrap_or(DEFAULT_OUTLINE_DEPTH))
-}
-
-/// Parse a `file:line:column` string, splitting from the right to preserve colons in paths.
-fn parse_colon_location(input: &str) -> Result<(PathBuf, usize, usize)> {
-    let parts = input.rsplitn(3, ':').collect::<Vec<_>>();
-
-    match parts.as_slice() {
-        [column_str, line_str, file_str] if !file_str.is_empty() => Ok((
-            PathBuf::from(file_str),
-            line_str
-                .parse::<usize>()
-                .with_context(|| format!("expected FILE:LINE:COLUMN format, got: {input}"))?,
-            column_str
-                .parse::<usize>()
-                .with_context(|| format!("expected FILE:LINE:COLUMN format, got: {input}"))?,
-        )),
-        _ => bail!("expected FILE:LINE:COLUMN format, got: {input}"),
-    }
-}
-
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize, JsonSchema, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SymbolKindFilter {
@@ -204,12 +190,12 @@ pub(crate) enum SymbolKindFilter {
 }
 
 impl SymbolKindFilter {
-    /// Return the LSP `SymbolKind` value this filter selects.
-    pub(crate) fn lsp_kind(self) -> u64 {
+    /// Return the LSP symbol kind this filter selects.
+    pub(crate) fn lsp_kind(self) -> SymbolKind {
         match self {
-            Self::Class => 5,
-            Self::Method => 6,
-            Self::Function => 12,
+            Self::Class => SymbolKind::CLASS,
+            Self::Method => SymbolKind::METHOD,
+            Self::Function => SymbolKind::FUNCTION,
         }
     }
 }

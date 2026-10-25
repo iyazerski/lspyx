@@ -40,10 +40,6 @@ pub(crate) enum McpSubcommand {
 
 #[derive(Clone)]
 struct LspyxMcp {
-    #[allow(
-        dead_code,
-        reason = "rmcp reads this field from generated tool router code"
-    )]
     tool_router: ToolRouter<Self>,
 }
 
@@ -108,11 +104,9 @@ impl LspyxMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let prepared = rename::prepare(request).map_err(invalid_params)?;
         Ok(match rename::execute(prepared) {
-            Ok(response) => {
-                let mut result = CallToolResult::success(vec![ContentBlock::text(
-                    response.text.unwrap_or_default(),
-                )]);
-                result.structured_content = response.payload;
+            Ok(reply) => {
+                let mut result = CallToolResult::success(vec![ContentBlock::text(reply.text)]);
+                result.structured_content = reply.payload;
                 result
             }
             Err(error) => tool_error(&error),
@@ -141,6 +135,11 @@ fn resolve_file(file: &Path, workspace: Option<&Path>) -> Result<PathBuf> {
     canonicalize_path(&workspace.join(file))
 }
 
+/// Run an `lspyx mcp` subcommand.
+///
+/// # Errors
+///
+/// Returns an error when the runtime cannot start or the MCP session fails.
 pub(crate) fn run_mcp_command(args: McpArgs) -> Result<()> {
     match args.command {
         McpSubcommand::Serve => {

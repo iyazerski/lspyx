@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -20,8 +20,9 @@ use serde_json::Value;
 
 use self::adapter::PersistentAdapter;
 use self::dispatch::{DispatchResult, dispatch_request};
-pub(crate) use self::protocol::{DaemonRequest, DaemonWireResponse};
-use self::protocol::{read_request, write_frame};
+pub(crate) use self::protocol::{DaemonReply, DaemonRequest, Declaration};
+use self::protocol::{DaemonResponse, read_request, write_frame};
+use crate::debug;
 use crate::workspace::{cache_dir, locate_ty_binary, workspace_cache_key};
 
 const DEFAULT_IDLE_SECONDS: u64 = 1800;
@@ -44,18 +45,23 @@ pub(crate) struct DaemonArgs {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum DaemonSubcommand {
+    /// Start the daemon in the background unless it is already running.
     #[command(after_help = ENSURE_AFTER_HELP)]
     Ensure(DaemonLifecycleArgs),
+    /// Run the daemon in the foreground.
     #[command(after_help = SERVE_AFTER_HELP)]
     Serve(DaemonLifecycleArgs),
+    /// Report whether the daemon is running.
     #[command(after_help = STATUS_AFTER_HELP)]
     Status,
+    /// Stop the running daemon.
     #[command(after_help = STOP_AFTER_HELP)]
     Stop,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct DaemonLifecycleArgs {
+    /// Exit after this many seconds without requests.
     #[arg(long, default_value_t = DEFAULT_IDLE_SECONDS)]
     pub(crate) idle_seconds: u64,
 }
@@ -92,16 +98,24 @@ pub(crate) fn run_daemon_command(
     }
 }
 
+/// Send `request` to the workspace daemon, starting it if needed, and return the rendered text.
+///
+/// # Errors
+///
+/// Returns an error when the daemon cannot be reached or the request fails.
 pub(crate) fn run_via_daemon(workspace_root: &Path, request: DaemonRequest) -> Result<String> {
-    Ok(run_via_daemon_response(workspace_root, request)?
-        .text
-        .unwrap_or_default())
+    Ok(run_via_daemon_reply(workspace_root, request)?.text)
 }
 
-pub(crate) fn run_via_daemon_response(
+/// Send `request` to the workspace daemon, starting it if needed, and return the full reply.
+///
+/// # Errors
+///
+/// Returns an error when the daemon cannot be reached or the request fails.
+pub(crate) fn run_via_daemon_reply(
     workspace_root: &Path,
     request: DaemonRequest,
-) -> Result<DaemonWireResponse> {
+) -> Result<DaemonReply> {
     let socket_path = socket_path(workspace_root)?;
 
     // Reuse an already-running daemon directly to avoid an extra ping roundtrip.
@@ -118,15 +132,7 @@ pub(crate) fn run_via_daemon_response(
         }
     };
 
-    if response.ok {
-        Ok(response)
-    } else {
-        Err(anyhow!(
-            response
-                .error
-                .unwrap_or_else(|| "daemon request failed".to_string())
-        ))
-    }
+    response.map_err(|error| anyhow!(error))
 }
 
 pub(crate) fn daemon_status(workspace_root: &Path) -> Result<DaemonStatus> {
@@ -146,16 +152,15 @@ fn ensure_daemon(workspace_root: &Path, idle_seconds: u64) -> Result<DaemonStatu
         return Ok(status);
     }
 
-    match fs::remove_file(&status.socket_path) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => {
-            return Err(error).with_context(|| {
-                format!(
-                    "failed to remove stale socket {}",
-                    status.socket_path.display()
-                )
-            });
-        }
-        _ => {}
+    if let Err(error) = fs::remove_file(&status.socket_path)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        return Err(error).with_context(|| {
+            format!(
+                "failed to remove stale socket {}",
+                status.socket_path.display()
+            )
+        });
     }
 
     spawn_daemon_process(workspace_root, idle_seconds)?;
@@ -175,45 +180,31 @@ fn ensure_daemon(workspace_root: &Path, idle_seconds: u64) -> Result<DaemonStatu
     )
 }
 
+/// Start a detached `lspyx daemon serve` process for the workspace.
 fn spawn_daemon_process(workspace_root: &Path, idle_seconds: u64) -> Result<()> {
     let current_exe = env::current_exe().context("failed to resolve current lspyx binary")?;
-
-    // Double-fork the daemon so it is re-parented before `daemon ensure` exits.
-    let child_pid = unsafe { libc::fork() };
-    if child_pid < 0 {
-        return Err(io::Error::last_os_error()).context("failed to fork daemon launcher");
+    let mut command = Command::new(current_exe);
+    command
+        .args(daemon_serve_args(workspace_root, idle_seconds))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(debug::child_stderr());
+    // SAFETY: the hook runs in the forked child before exec and only calls `setsid`, which is
+    // async-signal-safe and touches no memory shared with the parent.
+    unsafe {
+        // Start a new session so the daemon outlives the caller and ignores its terminal signals.
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
+    let mut child = command.spawn().context("failed to spawn daemon process")?;
 
-    if child_pid == 0 {
-        if unsafe { libc::setsid() } == -1 {
-            unsafe { libc::_exit(1) };
-        }
-
-        let grandchild_pid = unsafe { libc::fork() };
-        if grandchild_pid < 0 {
-            unsafe { libc::_exit(1) };
-        }
-
-        if grandchild_pid > 0 {
-            unsafe { libc::_exit(0) };
-        }
-
-        let stderr = if debug_enabled() {
-            Stdio::inherit()
-        } else {
-            Stdio::null()
-        };
-        let error = Command::new(current_exe)
-            .args(daemon_serve_args(workspace_root, idle_seconds))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(stderr)
-            .exec();
-        debug_log(format!("failed to exec daemon process: {error}"));
-        unsafe { libc::_exit(1) };
-    }
-
-    let _ = unsafe { libc::waitpid(child_pid, std::ptr::null_mut(), 0) };
+    // Reap the daemon when it exits so a long-lived caller, such as the MCP server, never keeps
+    // a zombie. The thread dies with short-lived callers, and the daemon is re-parented.
+    thread::spawn(move || child.wait());
     Ok(())
 }
 
@@ -290,7 +281,7 @@ fn serve_daemon(workspace_root: &Path, idle_seconds: u64) -> Result<()> {
             Ok(false) => continue,
             Err(error) => Err(error),
         };
-        let mut stream = match accepted {
+        let stream = match accepted {
             Ok((stream, _)) => stream,
             Err(error)
                 if matches!(
@@ -309,42 +300,59 @@ fn serve_daemon(workspace_root: &Path, idle_seconds: u64) -> Result<()> {
         };
 
         last_activity = Instant::now();
-        stream
-            .set_nonblocking(false)
-            .context("failed to configure daemon connection")?;
-
-        // Keep the daemon alive across client disconnects and per-request failures.
-        let request = match read_request(&mut stream) {
-            Ok(request) => request,
-            Err(error) => {
-                debug_log(format!(
-                    "failed to read daemon request for {}: {error:#}",
-                    workspace_root.display()
-                ));
-                continue;
-            }
-        };
-
-        let response = match dispatch_request(workspace_root, &mut adapter, request) {
-            Ok(DispatchResult::Respond(response)) => response,
-            Ok(DispatchResult::Shutdown(response)) => {
-                let _ = write_frame(&mut stream, &response);
-                break;
-            }
-            Err(error) => DaemonWireResponse::failure(&error),
-        };
-
-        if let Err(error) = write_frame(&mut stream, &response) {
-            debug_log(format!(
-                "failed to write daemon response for {}: {error:#}",
-                workspace_root.display()
-            ));
+        if handle_connection(workspace_root, &mut adapter, stream) == Connection::Shutdown {
+            break;
         }
     }
 
-    let _ = adapter.shutdown();
+    adapter.shutdown();
     let _ = fs::remove_file(&socket_path);
     Ok(())
+}
+
+/// What the serve loop does after handling a connection.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum Connection {
+    Continue,
+    Shutdown,
+}
+
+/// Answer one client request; failures are logged so the daemon outlives bad clients.
+fn handle_connection(
+    workspace_root: &Path,
+    adapter: &mut PersistentAdapter,
+    mut stream: UnixStream,
+) -> Connection {
+    if let Err(error) = stream.set_nonblocking(false) {
+        debug::log(&format!("failed to configure daemon connection: {error}"));
+        return Connection::Continue;
+    }
+
+    let request = match read_request(&mut stream) {
+        Ok(request) => request,
+        Err(error) => {
+            debug::log(&format!(
+                "failed to read daemon request for {}: {error:#}",
+                workspace_root.display()
+            ));
+            return Connection::Continue;
+        }
+    };
+
+    let (response, next): (DaemonResponse, Connection) =
+        match dispatch_request(workspace_root, adapter, request) {
+            Ok(DispatchResult::Respond(reply)) => (Ok(reply), Connection::Continue),
+            Ok(DispatchResult::Shutdown(reply)) => (Ok(reply), Connection::Shutdown),
+            Err(error) => (Err(format!("{error:#}")), Connection::Continue),
+        };
+
+    if let Err(error) = write_frame(&mut stream, &response) {
+        debug::log(&format!(
+            "failed to write daemon response for {}: {error:#}",
+            workspace_root.display()
+        ));
+    }
+    next
 }
 
 /// Wait until `listener` has a pending connection, returning `false` on timeout.
@@ -357,19 +365,11 @@ fn wait_readable(listener: &UnixListener, timeout: Duration) -> io::Result<bool>
     // Round up so sub-millisecond remainders do not spin with a zero timeout.
     let timeout_millis =
         libc::c_int::try_from(timeout.as_micros().div_ceil(1000)).unwrap_or(libc::c_int::MAX);
+    // SAFETY: `poll_fd` is a valid, exclusively borrowed `pollfd` array of length 1, and its
+    // descriptor stays open for the call because `listener` is borrowed.
     match unsafe { libc::poll(&mut poll_fd, 1, timeout_millis) } {
         -1 => Err(io::Error::last_os_error()),
         ready => Ok(ready > 0),
-    }
-}
-
-pub(crate) fn debug_enabled() -> bool {
-    env::var_os("LSPYX_DEBUG").is_some()
-}
-
-fn debug_log(message: String) {
-    if debug_enabled() {
-        eprintln!("{message}");
     }
 }
 
@@ -409,8 +409,11 @@ fn acquire_startup_lock(workspace_root: &Path) -> Result<fs::File> {
     Ok(file)
 }
 
-fn response_pid(response: &DaemonWireResponse) -> Option<u32> {
+/// Return the daemon pid reported in a successful ping or shutdown reply.
+fn response_pid(response: &DaemonResponse) -> Option<u32> {
     response
+        .as_ref()
+        .ok()?
         .payload
         .as_ref()?
         .get("pid")

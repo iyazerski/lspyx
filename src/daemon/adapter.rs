@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
+use super::Declaration;
 use crate::cli::{GotoTarget, SymbolKindFilter};
+use crate::file_position::FilePosition;
 use crate::lsp::model::{
     DocumentSymbolNode, LocationRecord, PositionRecord, RangeRecord, RenameEditRecord,
     ResolvedPosition, SymbolAtRecord, WorkspaceSymbolRecord,
@@ -17,12 +19,15 @@ use crate::lsp::parse::{
 use crate::lsp::{LspSession, SnippetReader, column_to_utf16_offset, nth_line, path_to_file_uri};
 use crate::workspace::{is_python_file, is_walkable_dir, read_dir};
 
+/// A long-lived ty LSP session that keeps request files synced as open documents.
+#[derive(Debug)]
 pub(super) struct PersistentAdapter {
     session: LspSession,
     /// Open documents keyed by their canonical path; request files are canonicalized by clients.
     documents: HashMap<PathBuf, OpenDocument>,
 }
 
+#[derive(Debug)]
 struct OpenDocument {
     text: String,
     version: i32,
@@ -36,51 +41,57 @@ impl PersistentAdapter {
         })
     }
 
-    pub(super) fn shutdown(&mut self) -> Result<()> {
-        self.session.shutdown()
+    /// Shut down the LSP session.
+    pub(super) fn shutdown(self) {
+        self.session.shutdown();
     }
 
-    pub(super) fn resolve_position(
-        &mut self,
-        file: &Path,
-        line: usize,
-        requested_column: usize,
-    ) -> Result<ResolvedPosition> {
+    /// Identify the symbol at `position`, enriched with its document symbol kind and detail.
+    pub(super) fn resolve_position(&mut self, position: &FilePosition) -> Result<ResolvedPosition> {
+        let FilePosition { file, line, column } = position;
         self.ensure_file_synced(file)?;
-        let line_text = self.document_line(file, line)?;
+        let line_text = self.document_line(file, *line)?;
         let source_line = line_text.trim().to_string();
-        let symbol = extract_symbol_at(line_text, requested_column)?;
+        let symbol = extract_symbol_at(line_text, *column)?;
         let resolved_column = symbol.as_ref().map(|value| value.start_column);
-
-        let symbol = match symbol {
-            Some(symbol) => {
-                let document_symbols = self.document_symbols(file)?;
-                let position = PositionRecord {
-                    line,
-                    column: symbol.start_column,
-                };
-                match find_document_symbol(&document_symbols, position)
-                    .filter(|value| value.name == symbol.name)
-                {
-                    Some(document_symbol) => Some(SymbolAtRecord {
-                        kind: Some(document_symbol.kind),
-                        detail: document_symbol.detail.clone(),
-                        ..symbol
-                    }),
-                    None => Some(symbol),
-                }
-            }
-            None => None,
-        };
+        let symbol = symbol
+            .map(|symbol| self.describe_symbol(file, *line, symbol))
+            .transpose()?;
 
         Ok(ResolvedPosition {
-            file: file.to_path_buf(),
-            line,
-            requested_column,
+            file: file.clone(),
+            line: *line,
+            requested_column: *column,
             resolved_column,
             source_line,
             symbol,
         })
+    }
+
+    /// Add kind and detail from the matching document symbol, when there is one.
+    fn describe_symbol(
+        &mut self,
+        file: &Path,
+        line: usize,
+        symbol: SymbolAtRecord,
+    ) -> Result<SymbolAtRecord> {
+        let document_symbols = self.document_symbols(file)?;
+        let position = PositionRecord {
+            line,
+            column: symbol.start_column,
+        };
+        Ok(
+            match find_document_symbol(&document_symbols, position)
+                .filter(|value| value.name == symbol.name)
+            {
+                Some(document_symbol) => SymbolAtRecord {
+                    kind: Some(document_symbol.kind),
+                    detail: document_symbol.detail.clone(),
+                    ..symbol
+                },
+                None => symbol,
+            },
+        )
     }
 
     pub(super) fn goto_locations(
@@ -132,16 +143,14 @@ impl PersistentAdapter {
         &mut self,
         workspace_root: &Path,
         position: &ResolvedPosition,
-        include_declaration: bool,
+        declaration: Declaration,
     ) -> Result<Vec<LocationRecord>> {
         let mut params = self.position_params(position)?;
-        params["context"] = json!({ "includeDeclaration": include_declaration });
+        params["context"] = json!({ "includeDeclaration": declaration == Declaration::Include });
         let locations = self.locations("textDocument/references", params)?;
 
-        let unique_files = locations
-            .iter()
-            .map(|location| &location.file)
-            .collect::<HashSet<_>>();
+        let unique_files: HashSet<&PathBuf> =
+            locations.iter().map(|location| &location.file).collect();
         if unique_files.len() > 1 {
             return Ok(locations);
         }
@@ -387,10 +396,10 @@ fn merge_locations(
     mut primary: Vec<LocationRecord>,
     additional: Vec<LocationRecord>,
 ) -> Vec<LocationRecord> {
-    let mut seen = primary
+    let mut seen: HashSet<(PathBuf, PositionRecord)> = primary
         .iter()
         .map(|location| (location.file.clone(), location.range.start))
-        .collect::<HashSet<_>>();
+        .collect();
 
     for location in additional {
         if seen.insert((location.file.clone(), location.range.start)) {
@@ -405,7 +414,7 @@ fn merge_locations(
 mod tests {
     use std::path::PathBuf;
 
-    use crate::lsp::model::{PositionRecord, RangeRecord, WorkspaceSymbolRecord};
+    use crate::lsp::model::{PositionRecord, RangeRecord, SymbolKind, WorkspaceSymbolRecord};
 
     use super::{rank_workspace_symbols, symbol_columns};
 
@@ -413,7 +422,7 @@ mod tests {
         let position = PositionRecord { line: 1, column: 1 };
         WorkspaceSymbolRecord {
             name: name.to_string(),
-            kind: 5,
+            kind: SymbolKind::CLASS,
             container_name: None,
             file: PathBuf::from("src/app.py"),
             range: RangeRecord {

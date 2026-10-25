@@ -6,7 +6,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::resolve_file;
-use crate::daemon::{self, DaemonRequest};
+use crate::daemon::{self, DaemonReply, DaemonRequest};
+use crate::file_position::FilePosition;
 use crate::workspace::resolve_workspace_root;
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -26,44 +27,36 @@ pub(super) struct RenameRequest {
 #[derive(Debug)]
 pub(super) struct PreparedRename {
     workspace_root: PathBuf,
-    file: PathBuf,
-    line: usize,
-    column: usize,
+    position: FilePosition,
     new_name: String,
 }
 
+/// Validate the request and resolve its file and workspace root.
 pub(super) fn prepare(request: RenameRequest) -> Result<PreparedRename> {
-    if request.line == 0 {
-        bail!("line must be a 1-based value");
-    }
-    if request.column == 0 {
-        bail!("column must be a 1-based value");
-    }
+    let mut position = FilePosition::new(request.file, request.line, request.column)?;
     let new_name = request.new_name.trim();
     if new_name.is_empty() {
         bail!("new_name must not be empty");
     }
 
     let cwd = env::current_dir().context("failed to determine current directory")?;
-    let file = resolve_file(&request.file, request.workspace.as_deref())?;
-    let workspace_root = resolve_workspace_root(request.workspace.as_deref(), Some(&file), &cwd)?;
+    position.file = resolve_file(&position.file, request.workspace.as_deref())?;
+    let workspace_root =
+        resolve_workspace_root(request.workspace.as_deref(), Some(&position.file), &cwd)?;
 
     Ok(PreparedRename {
         workspace_root,
-        file,
-        line: request.line,
-        column: request.column,
+        position,
         new_name: new_name.to_string(),
     })
 }
 
-pub(super) fn execute(prepared: PreparedRename) -> Result<daemon::DaemonWireResponse> {
-    daemon::run_via_daemon_response(
+/// Run the prepared rename preview through the workspace daemon.
+pub(super) fn execute(prepared: PreparedRename) -> Result<DaemonReply> {
+    daemon::run_via_daemon_reply(
         &prepared.workspace_root,
         DaemonRequest::Rename {
-            file: prepared.file,
-            line: prepared.line,
-            column: prepared.column,
+            position: prepared.position,
             new_name: prepared.new_name,
         },
     )

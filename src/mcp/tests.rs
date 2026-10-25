@@ -5,6 +5,8 @@ use super::diagnostics::{DiagnosticsRequest, prepare as prepare_diagnostics};
 use super::explore::{ExploreRequest, ExploreTarget, prepare as prepare_explore, select_target};
 use super::rename::{RenameRequest, prepare as prepare_rename};
 use crate::cli::SymbolKindFilter;
+use crate::file_position::FilePosition;
+use crate::lsp::model::OutlineDepth;
 
 fn request() -> ExploreRequest {
     ExploreRequest {
@@ -52,21 +54,27 @@ fn routes_file_only_to_outline_with_depth() {
         select_target(&request).unwrap(),
         ExploreTarget::Outline {
             file: "src/app.py".into(),
-            depth: Some(2),
+            depth: OutlineDepth::Limited(2),
         }
     );
 
     request.depth = Some(3);
     assert!(matches!(
         select_target(&request).unwrap(),
-        ExploreTarget::Outline { depth: Some(3), .. }
+        ExploreTarget::Outline {
+            depth: OutlineDepth::Limited(3),
+            ..
+        }
     ));
 
     request.depth = None;
     request.full = true;
     assert!(matches!(
         select_target(&request).unwrap(),
-        ExploreTarget::Outline { depth: None, .. }
+        ExploreTarget::Outline {
+            depth: OutlineDepth::Full,
+            ..
+        }
     ));
 }
 
@@ -81,11 +89,11 @@ fn routes_file_position_to_position_bundle() {
 
     assert_eq!(
         select_target(&request).unwrap(),
-        ExploreTarget::Position {
+        ExploreTarget::Position(FilePosition {
             file: "src/app.py".into(),
             line: 42,
             column: 17,
-        }
+        })
     );
 }
 

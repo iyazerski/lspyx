@@ -84,6 +84,27 @@ impl DiagnosticSource {
             Self::Ty => "ty",
         }
     }
+
+    /// Locate this tool's binary for the workspace.
+    fn locate(self, workspace_root: &Path) -> Result<PathBuf> {
+        match self {
+            Self::Ruff => locate_ruff_binary(workspace_root),
+            Self::Ty => locate_ty_binary(workspace_root),
+        }
+    }
+
+    /// Run this tool's check on `target` and parse its diagnostics.
+    fn execute(
+        self,
+        binary: &Path,
+        workspace_root: &Path,
+        target: &Path,
+    ) -> Result<Vec<DiagnosticRecord>> {
+        match self {
+            Self::Ruff => execute_ruff(binary, workspace_root, target),
+            Self::Ty => execute_ty(binary, workspace_root, target),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -100,6 +121,7 @@ pub(crate) struct DiagnosticFix {
     pub(crate) message: Option<String>,
 }
 
+#[derive(Debug)]
 struct ToolRun {
     binary: Option<PathBuf>,
     result: Result<Vec<DiagnosticRecord>>,
@@ -112,17 +134,18 @@ pub(crate) fn run_diagnostics(
     limit: usize,
 ) -> DiagnosticsOutput {
     let (ruff_run, ty_run) = thread::scope(|scope| {
-        let ruff =
-            scope.spawn(|| run_tool(locate_ruff_binary, execute_ruff, workspace_root, target));
-        let ty = scope.spawn(|| run_tool(locate_ty_binary, execute_ty, workspace_root, target));
-        let joined = |tool: &str, run: thread::Result<ToolRun>| {
-            run.unwrap_or_else(|_| ToolRun {
-                binary: None,
-                result: Err(anyhow!("{tool} diagnostics worker panicked")),
-            })
+        let spawn = |source: DiagnosticSource| {
+            let worker = scope.spawn(move || run_tool(source, workspace_root, target));
+            move || {
+                worker.join().unwrap_or_else(|_| ToolRun {
+                    binary: None,
+                    result: Err(anyhow!("{} diagnostics worker panicked", source.label())),
+                })
+            }
         };
-
-        (joined("ruff", ruff.join()), joined("ty", ty.join()))
+        let ruff = spawn(DiagnosticSource::Ruff);
+        let ty = spawn(DiagnosticSource::Ty);
+        (ruff(), ty())
     });
 
     build_output(workspace_root, target, limit, ruff_run, ty_run)
@@ -151,9 +174,12 @@ pub(crate) fn render_diagnostics(output: &DiagnosticsOutput) -> String {
         display_path(&output.workspace_root, &output.target)
     ));
 
-    for (name, report) in [("ruff", &output.tools.ruff), ("ty", &output.tools.ty)] {
+    for (source, report) in [
+        (DiagnosticSource::Ruff, &output.tools.ruff),
+        (DiagnosticSource::Ty, &output.tools.ty),
+    ] {
         if let Some(error) = report.error.as_deref() {
-            lines.push(format!("{name}: failed: {error}"));
+            lines.push(format!("{}: failed: {error}", source.label()));
         }
     }
 
@@ -185,15 +211,10 @@ pub(crate) fn render_diagnostics(output: &DiagnosticsOutput) -> String {
 }
 
 /// Locate a diagnostics tool and run it, keeping the binary path for reporting.
-fn run_tool(
-    locate: fn(&Path) -> Result<PathBuf>,
-    execute: fn(&Path, &Path, &Path) -> Result<Vec<DiagnosticRecord>>,
-    workspace_root: &Path,
-    target: &Path,
-) -> ToolRun {
-    match locate(workspace_root) {
+fn run_tool(source: DiagnosticSource, workspace_root: &Path, target: &Path) -> ToolRun {
+    match source.locate(workspace_root) {
         Ok(binary) => ToolRun {
-            result: execute(&binary, workspace_root, target),
+            result: source.execute(&binary, workspace_root, target),
             binary: Some(binary),
         },
         Err(error) => ToolRun {
@@ -228,7 +249,7 @@ fn execute_ruff(
     let output = command
         .output()
         .with_context(|| format!("failed to run {}", binary.display()))?;
-    validate_diagnostic_exit("ruff", &output, &[0, 1])?;
+    validate_diagnostic_exit(DiagnosticSource::Ruff, &output)?;
     parse_ruff_output(&output.stdout, workspace_root)
 }
 
@@ -250,15 +271,17 @@ fn execute_ty(
         .current_dir(workspace_root)
         .output()
         .with_context(|| format!("failed to run {}", binary.display()))?;
-    validate_diagnostic_exit("ty", &output, &[0, 1])?;
+    validate_diagnostic_exit(DiagnosticSource::Ty, &output)?;
     parse_ty_output(&output.stdout, workspace_root)
 }
 
-fn validate_diagnostic_exit(tool: &str, output: &Output, accepted: &[i32]) -> Result<()> {
+/// Accept exit code 0 (clean) or 1 (diagnostics found); anything else is a tool failure.
+fn validate_diagnostic_exit(source: DiagnosticSource, output: &Output) -> Result<()> {
+    let tool = source.label();
     let Some(code) = output.status.code() else {
         bail!("{tool} terminated without an exit code");
     };
-    if accepted.contains(&code) {
+    if matches!(code, 0 | 1) {
         return Ok(());
     }
 
