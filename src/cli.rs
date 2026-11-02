@@ -24,6 +24,7 @@ const OUTLINE_AFTER_HELP: &str =
 const DAEMON_AFTER_HELP: &str =
     "Examples:\n  lspyx daemon status\n  lspyx daemon ensure --idle-seconds 900";
 const MCP_AFTER_HELP: &str = "Example:\n  lspyx mcp serve";
+const UPDATE_AFTER_HELP: &str = "Example:\n  lspyx update";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -62,6 +63,9 @@ pub(crate) enum CommandKind {
     /// Run lspyx as an MCP server.
     #[command(after_help = MCP_AFTER_HELP)]
     Mcp(mcp::McpArgs),
+    /// Install the latest release if it's newer than this one.
+    #[command(after_help = UPDATE_AFTER_HELP)]
+    Update,
 }
 
 #[derive(Args, Debug)]

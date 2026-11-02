@@ -9,6 +9,7 @@ mod file_position;
 mod lsp;
 mod mcp;
 mod render;
+mod update;
 mod workspace;
 
 use clap::Parser;

@@ -27,6 +27,8 @@ Install `lspyx`:
 curl -fsSL https://raw.githubusercontent.com/iyazerski/lspyx/main/install.sh | sh
 ```
 
+Update it to the latest release with `lspyx update`.
+
 Add this line to the `AGENTS.md` / `CLAUDE.md` so agents use LSPYX efficiently:
 
 ```md

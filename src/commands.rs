@@ -8,6 +8,7 @@ use crate::cli::{
 };
 use crate::daemon::{self, DaemonRequest};
 use crate::mcp;
+use crate::update;
 use crate::workspace::{
     canonicalize_path, locate_ruff_binary, locate_ty_binary, resolve_workspace_root,
 };
@@ -26,6 +27,7 @@ pub(crate) fn run(cli: Cli) -> Result<()> {
             &workspace_root(args.workspace.as_deref(), None)?,
             args.command,
         )?,
+        CommandKind::Update => update::run_update()?,
     };
     println!("{output}");
     Ok(())
