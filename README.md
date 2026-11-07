@@ -11,9 +11,9 @@ and ty and Ruff checks through one small MCP server. Or use the same answers fro
 
 [![Latest release](https://img.shields.io/github/v/release/iyazerski/lspyx?color=3b6cf6)](https://github.com/iyazerski/lspyx/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/lspyx?color=orange)](https://crates.io/crates/lspyx)
-[![CI](https://github.com/iyazerski/lspyx/actions/workflows/ci.yml/badge.svg)](https://github.com/iyazerski/lspyx/actions/workflows/ci.yml)
 [![macOS · Linux](https://img.shields.io/badge/macOS%20·%20Linux-x86__64%20·%20ARM64-black)](#install)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Buy me a coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/iyazerski)
 
 <img src="docs/demo.gif" width="720" alt="lspyx finding a class, the usages of a method, a file outline and a definition in a small Python project">
 
@@ -23,102 +23,37 @@ and ty and Ruff checks through one small MCP server. Or use the same answers fro
 
 Coding agents explore Python with `grep` and by reading whole files. That's slow, it fills the context window, and text search can't tell `Cart.add` from every other `add`. lspyx answers with the type checker instead.
 
-- **Semantic answers.** Definitions, usages, types and hover docs come from [ty](https://github.com/astral-sh/ty), Astral's Python type checker and language server. A usage is a real reference, not a matching string.
-- **Small, focused output.** Every result is a `file:line:column` with its source line, so the agent can jump straight there. A `limit` keeps big results short.
-- **Safe rename previews.** `rename` returns a complete unified diff for a cross-file rename and checks every edit. It never writes files: the agent reviews and applies the diff.
-- **Your repo's own checks.** `diagnostics` runs [Ruff](https://github.com/astral-sh/ruff) and ty with your project's settings, on a file, a folder or the whole repo.
-- **Fast after the first call.** A background daemon per workspace keeps ty warm, so later calls take milliseconds. It stops by itself after 30 idle minutes.
-- **Uses your project's tools.** lspyx prefers `ty` and `ruff` from the project's `.venv`, then the ones on your `PATH`.
-- **Local and small.** One Rust binary for macOS and Linux. It sends nothing over the network, except when you run `lspyx update`.
-- **Free and open source** under the MIT license.
-
-## MCP tools
-
-| Tool | What it does | Pass |
-| --- | --- | --- |
-| `explore` | Search symbols by name, outline a file, or inspect the symbol at a position with its definition and usages. | `query`, or `file`, or `file` + `line` + `column`. Optional `limit`, `kind`, `depth`. |
-| `diagnostics` | Run Ruff and ty with the repo's settings and return their findings. | `workspace` and the smallest useful `path`. Optional `limit`. |
-| `rename` | Preview a semantic rename as a complete unified diff, without changing files. | `file` + `line` + `column` + `new_name`. |
-
-Lines and columns start at 1. Relative paths need `workspace`, the repo root.
+- **Semantic answers.** Definitions, usages, types and docs come from [ty](https://github.com/astral-sh/ty), Astral's Python type checker. A usage is a real reference, not a matching string.
+- **Short output.** Each result is a `file:line:column` with its source line, and `limit` keeps big results short.
+- **Both checkers in one call.** `diagnostics` runs [Ruff](https://github.com/astral-sh/ruff) and ty with your project's settings, on a file, a folder or the whole repo.
+- **Safe rename previews.** `rename` returns a complete, checked diff for a cross-file rename. It never writes files.
+- **Fast.** A daemon per workspace keeps ty warm, so later calls take milliseconds. It stops after 30 idle minutes.
+- **No setup.** lspyx uses `ty` and `ruff` from the project's `.venv` first, then from your `PATH`, and finds `src/` layouts and monorepo packages by itself.
+- **Local, free and open source.** One Rust binary under the MIT license. It sends nothing over the network, except when you run `lspyx update`.
 
 ## Install
 
-lspyx runs on macOS and Linux, on x86_64 and ARM64. Windows isn't supported. Pick one:
+For macOS and Linux, on x86_64 and ARM64. Pick one:
 
-- **Homebrew:**
+- **Homebrew:** `brew install iyazerski/tap/lspyx`
+- **Cargo:** `cargo install lspyx --locked`
+- **Script:** `curl -fsSL https://raw.githubusercontent.com/iyazerski/lspyx/main/install.sh | sh`
 
-  ```sh
-  brew install iyazerski/tap/lspyx
-  ```
-
-- **Cargo:**
-
-  ```sh
-  cargo install lspyx --locked
-  ```
-
-- **Script.** It puts lspyx in `~/.local/bin` and installs ty and Ruff with [uv](https://docs.astral.sh/uv/) if they're missing:
-
-  ```sh
-  curl -fsSL https://raw.githubusercontent.com/iyazerski/lspyx/main/install.sh | sh
-  ```
-
-lspyx needs ty and Ruff, either in your project's `.venv` or on your `PATH`. With Homebrew or Cargo, install them yourself if you don't have them:
-
-```sh
-brew install ty ruff     # or: uv tool install ty && uv tool install ruff
-```
-
-Then check the setup from your project folder:
-
-```sh
-lspyx doctor
-```
+lspyx needs ty and Ruff in your project's `.venv` or on your `PATH`. The script installs them with [uv](https://docs.astral.sh/uv/) if they're missing. Otherwise, run `brew install ty ruff` or `uv tool install ty && uv tool install ruff`. Then run `lspyx doctor` in your project to check the setup.
 
 ## Connect your agent
 
-lspyx speaks MCP over stdio. The command is `lspyx mcp serve`.
-
-**Claude Code**
-
 ```sh
-claude mcp add --scope user lspyx -- lspyx mcp serve
+claude mcp add --scope user lspyx -- lspyx mcp serve   # Claude Code
+codex mcp add lspyx -- lspyx mcp serve                 # Codex
+pi mcp add lspyx -- lspyx mcp serve                    # pi
 ```
 
-**Codex**
-
-```sh
-codex mcp add lspyx -- lspyx mcp serve
-```
-
-**pi**
-
-```sh
-pi mcp add lspyx -- lspyx mcp serve
-```
-
-**Cursor:** add this to `~/.cursor/mcp.json`, or to `.cursor/mcp.json` in a project:
+For Cursor, add this to `~/.cursor/mcp.json`. Other clients use the same command and arguments:
 
 ```json
-{
-  "mcpServers": {
-    "lspyx": { "command": "lspyx", "args": ["mcp", "serve"] }
-  }
-}
+{ "mcpServers": { "lspyx": { "command": "lspyx", "args": ["mcp", "serve"] } } }
 ```
-
-**VS Code:** add this to `.vscode/mcp.json`:
-
-```json
-{
-  "servers": {
-    "lspyx": { "type": "stdio", "command": "lspyx", "args": ["mcp", "serve"] }
-  }
-}
-```
-
-**Other clients:** run `lspyx` with the arguments `mcp serve` as a stdio server.
 
 Then add this line to your `AGENTS.md` or `CLAUDE.md`, so the agent reaches for lspyx instead of `grep`:
 
@@ -126,59 +61,56 @@ Then add this line to your `AGENTS.md` or `CLAUDE.md`, so the agent reaches for 
 - Use lspyx MCP for Python code navigation, diagnostics, and refactors. Use `explore` to understand code, `diagnostics` to check changes, and `rename` to preview cross-file renames.
 ```
 
-## Use it from the terminal
+## Tools
 
-The CLI gives the same navigation answers as `explore`. Positions are `file:line:column`, starting at 1.
-
-| Command | What it does |
+| MCP tool | What it does |
 | --- | --- |
-| `lspyx find-symbol User --kind class` | Search the workspace for symbols by name. |
-| `lspyx outline src/app.py` | Show a file's classes, functions and methods. Add `--full` for the whole tree. |
-| `lspyx inspect src/app.py:42:17` | Show the symbol at a position, with its signature and docs. |
-| `lspyx goto src/app.py:42:17` | Jump to the definition. Add `--kind declaration` or `--kind type`. |
-| `lspyx usages src/app.py:42:17` | List every usage. Add `--exclude-declaration` to skip the definition. |
-| `lspyx doctor` | Show which ty and Ruff lspyx uses, and whether the daemon is running. |
-| `lspyx daemon status` | Check, start (`ensure`) or `stop` the workspace daemon. |
-| `lspyx update` | Install the latest release if it's newer. |
+| `explore` | Search symbols by name, outline a file, or inspect the symbol at a position with its definition and usages. |
+| `diagnostics` | Run Ruff and ty with the repo's settings on a file, a folder or the whole repo. |
+| `rename` | Preview a semantic rename as a complete unified diff, without changing files. |
 
-Most commands take `--limit` and `--workspace`. Run `lspyx <command> --help` for all options.
-
-## How it works
-
-1. lspyx finds the workspace root: the nearest folder above the file, or the current folder, with a `pyproject.toml`, `.git`, `Cargo.toml` or `package.json`.
-2. The first request starts a daemon for that workspace. The daemon runs `ty server` and talks to it over the Language Server Protocol. It adds `src` folders and Python groups under `python/` as import roots, so monorepos resolve too.
-3. Later requests from the CLI and the MCP server reuse the daemon over a Unix socket in `~/.cache/lspyx`. The daemon exits after 30 idle minutes.
-4. `diagnostics` runs `ruff check` and `ty check` directly, so they read your `pyproject.toml`, `ruff.toml` and `ty.toml` settings.
-
-To use a specific build of ty or Ruff, set `LSPYX_TY_PATH` or `LSPYX_RUFF_PATH`.
+The CLI gives the same navigation answers: `lspyx find-symbol`, `outline`, `inspect`, `goto` and `usages`. Positions are `file:line:column`, starting at 1. Run `lspyx --help` for all commands.
 
 ## FAQ
 
-**Why not just let the agent use grep?**
+<details>
+<summary><b>Why not just let the agent use grep?</b></summary>
+
 Grep finds text. lspyx finds the symbol. It skips comments, strings and other things with the same name, follows imports, and returns only the lines that matter, so the agent reads less and guesses less.
 
-**Does lspyx change my code?**
+</details>
+<details>
+<summary><b>How does it work?</b></summary>
+
+The first request in a workspace starts a daemon that runs `ty server` and talks to it over the Language Server Protocol. Later requests from the CLI and the MCP server reuse it through a Unix socket in `~/.cache/lspyx`. `diagnostics` runs `ruff check` and `ty check` directly, so they read your `pyproject.toml`, `ruff.toml` and `ty.toml`. To use a specific ty or Ruff, set `LSPYX_TY_PATH` or `LSPYX_RUFF_PATH`.
+
+</details>
+<details>
+<summary><b>Does lspyx change my code?</b></summary>
+
 No. Every tool only reads. `rename` returns a diff for the agent or you to apply.
 
-**Does it support other languages?**
-No, only Python. It's built around ty and Ruff.
+</details>
+<details>
+<summary><b>Does it support other languages, or need Pyright?</b></summary>
 
-**Do I need Pyright or Pylance?**
-No. lspyx uses ty as its language server.
+No to both. lspyx is for Python only, and it uses ty as its language server.
 
-**Does it work on Windows?**
+</details>
+<details>
+<summary><b>Does it work on Windows?</b></summary>
+
 Not natively, because the daemon uses Unix sockets. WSL may work with the Linux build, but it isn't tested.
 
-**How do I update it?**
-Run `lspyx update` for a script install, `brew upgrade lspyx` for Homebrew, or `cargo install lspyx --locked` for Cargo. Running daemons and MCP servers switch to the new version when they restart.
+</details>
+<details>
+<summary><b>How do I update or uninstall it?</b></summary>
 
-## Uninstall
+Update with `lspyx update` for a script install, `brew upgrade lspyx` for Homebrew, or `cargo install lspyx --locked` for Cargo. Running daemons and MCP servers switch to the new version when they restart.
 
-- **Homebrew:** `brew uninstall lspyx`
-- **Cargo:** `cargo uninstall lspyx`
-- **Script:** `rm ~/.local/bin/lspyx`
+Uninstall with `brew uninstall lspyx`, `cargo uninstall lspyx`, or `rm ~/.local/bin/lspyx`. Then remove the cache with `rm -rf ~/.cache/lspyx`, and remove the server from your agent, for example with `claude mcp remove lspyx`.
 
-To remove its cache too, run `rm -rf ~/.cache/lspyx`. Remove the server from your agent too, for example with `claude mcp remove lspyx`.
+</details>
 
 ## Build from source
 
@@ -195,4 +127,4 @@ Pre-commit hooks run with [prek](https://github.com/j178/prek): `prek install`.
 
 [MIT](LICENSE) © Ihar Yazerski. lspyx includes open-source software under its own licenses: see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md). Issues and pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-lspyx isn't affiliated with or endorsed by Astral, Anthropic, OpenAI, Cursor or Microsoft. ty, Ruff, Claude, Codex, Cursor and VS Code are trademarks of their owners.
+lspyx isn't affiliated with or endorsed by Astral, Anthropic, OpenAI or Cursor. ty, Ruff, Claude, Codex and Cursor are trademarks of their owners.
