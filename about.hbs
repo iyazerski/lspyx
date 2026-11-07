@@ -1,0 +1,23 @@
+# Third-party licenses
+
+lspyx is built from the open-source software below. Each entry gives the
+license and the packages that use it.
+
+{{!-- lspyx itself is under LICENSE, so its own entry is skipped. --}}
+{{#each licenses}}
+{{#unless (and (eq (len used_by) 1) (eq used_by.0.crate.name "lspyx"))}}
+## {{{name}}}
+
+Used by:
+{{#each used_by}}
+{{#unless (eq crate.name "lspyx")}}
+- {{crate.name}} {{crate.version}}
+{{/unless}}
+{{/each}}
+
+```text
+{{{text}}}
+```
+
+{{/unless}}
+{{/each}}

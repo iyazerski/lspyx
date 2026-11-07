@@ -1,5 +1,10 @@
 name: Release
 
+# Pushing a tag vX.Y.Z that matches Cargo.toml publishes:
+# - the GitHub release with an archive and checksum per platform, which
+#   install.sh and `lspyx update` download from releases/latest,
+# - Formula/lspyx.rb in iyazerski/homebrew-tap,
+# - the crate on crates.io.
 on:
   push:
     tags:
@@ -8,9 +13,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: Build ${{ matrix.target }}
+    needs: ci
     strategy:
       matrix:
         include:
@@ -48,7 +61,9 @@ jobs:
           ASSET: lspyx-${{ matrix.target }}.tar.gz
         run: |
           mkdir dist
-          tar -C "target/${{ matrix.target }}/release" -czf "dist/$ASSET" lspyx
+          tar -czf "dist/$ASSET" \
+            -C "target/${{ matrix.target }}/release" lspyx \
+            -C "$GITHUB_WORKSPACE" LICENSE THIRD_PARTY_LICENSES.md
           cd dist
           shasum -a 256 "$ASSET" > "$ASSET.sha256"
       - uses: actions/upload-artifact@v7
@@ -65,6 +80,10 @@ jobs:
       contents: write
 
     steps:
+      - uses: actions/checkout@v7
+        with:
+          # The whole history and tags, to list the changes since the last release.
+          fetch-depth: 0
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -77,9 +96,78 @@ jobs:
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" dist/* \
-              --generate-notes \
-              --title "lspyx $GITHUB_REF_NAME" \
-              --verify-tag
+            exit 0
           fi
+          previous=$(git describe --tags --abbrev=0 --match 'v*' "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          changes=$(git log --no-merges --format='- %s' ${previous:+"$previous..$GITHUB_REF_NAME"})
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "lspyx $GITHUB_REF_NAME" \
+            --verify-tag \
+            --notes-file - <<EOF
+          ## What's new
+
+          $changes
+
+          ## Install
+
+          - **Homebrew:** \`brew install iyazerski/tap/lspyx\`
+          - **Cargo:** \`cargo install lspyx --locked\`
+          - **Script:** \`curl -fsSL https://raw.githubusercontent.com/$GH_REPO/main/install.sh | sh\`
+          - **Update:** \`lspyx update\`, or \`brew upgrade lspyx\` for a Homebrew install.
+
+          lspyx runs [ty](https://github.com/astral-sh/ty) and [Ruff](https://github.com/astral-sh/ruff). The script installs them, and other installs need them on PATH or in your project's \`.venv\`.
+          EOF
+
+  homebrew:
+    name: Update Homebrew formula
+    needs: release
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: lspyx-*
+          merge-multiple: true
+      - name: Push formula to iyazerski/homebrew-tap
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          export GIT_SSH_COMMAND="ssh -i $RUNNER_TEMP/tap_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          echo "$DEPLOY_KEY" > "$RUNNER_TEMP/tap_key"
+          chmod 600 "$RUNNER_TEMP/tap_key"
+          git clone --depth 1 git@github.com:iyazerski/homebrew-tap.git "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Formula"
+          scripts/homebrew-formula.sh "$version" dist > "$RUNNER_TEMP/tap/Formula/lspyx.rb"
+          cd "$RUNNER_TEMP/tap"
+          git add Formula/lspyx.rb
+          if git diff --cached --quiet; then
+            echo "Formula is already at $version"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "Update lspyx to $version"
+          git push
+
+  crates-io:
+    name: Publish to crates.io
+    needs: release
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # A rerun after a partial failure must not fail on the version that's already up.
+          if curl -fsS -A "lspyx-release (github.com/iyazerski/lspyx)" \
+            "https://crates.io/api/v1/crates/lspyx/$version" >/dev/null 2>&1; then
+            echo "lspyx $version is already on crates.io"
+            exit 0
+          fi
+          cargo publish --locked

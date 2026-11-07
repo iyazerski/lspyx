@@ -16,6 +16,14 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Install the latest release over this binary if it's newer, and return a summary.
 pub(crate) fn run_update() -> Result<String> {
+    let exe = env::current_exe().context("failed to resolve current lspyx binary")?;
+    // Homebrew owns the files under its Cellar, so replacing them would break `brew upgrade`.
+    if fs::canonicalize(&exe)
+        .is_ok_and(|path| path.components().any(|part| part.as_os_str() == "Cellar"))
+    {
+        bail!("lspyx was installed with Homebrew; run `brew upgrade lspyx` instead");
+    }
+
     // GitHub redirects `releases/latest` to the latest release's tag page.
     let latest_url = run(
         Command::new("curl")
@@ -32,7 +40,6 @@ pub(crate) fn run_update() -> Result<String> {
         return Ok(format!("summary: lspyx {VERSION} is up to date"));
     }
 
-    let exe = env::current_exe().context("failed to resolve current lspyx binary")?;
     let dir = exe
         .parent()
         .context("the lspyx binary has no parent directory")?;

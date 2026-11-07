@@ -1,12 +1,17 @@
 [package]
 name = "lspyx"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
-description = "Agent-friendly Python semantic navigation and diagnostics"
+rust-version = "1.89"
+description = "Python code navigation, rename previews, and ty/Ruff diagnostics for AI coding agents, as an MCP server and CLI"
 license = "MIT"
+authors = ["Ihar Yazerski"]
+repository = "https://github.com/iyazerski/lspyx"
+homepage = "https://github.com/iyazerski/lspyx"
 readme = "README.md"
-keywords = ["lsp", "cli", "semantic-navigation", "python", "agent"]
+keywords = ["mcp", "lsp", "python", "ai-agents", "cli"]
 categories = ["command-line-utilities", "development-tools"]
+include = ["/src", "/tests", "/LICENSE", "/README.md", "/THIRD_PARTY_LICENSES.md"]
 
 [dependencies]
 anyhow = "1.0.104"

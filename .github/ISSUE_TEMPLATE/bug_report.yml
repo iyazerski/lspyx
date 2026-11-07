@@ -1,0 +1,52 @@
+name: Bug report
+description: Something in lspyx doesn't work as expected.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you run, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: A small Python snippet or a public repo helps a lot.
+      placeholder: |
+        1. Open a project with ...
+        2. Run `lspyx usages src/app.py:12:5`
+        3. ...
+  - type: textarea
+    id: doctor
+    attributes:
+      label: lspyx doctor
+      description: Run `lspyx doctor` in the project and paste the output, then add `ty --version` and `ruff --version`.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installed with
+      options:
+        - Homebrew
+        - Cargo
+        - install.sh
+        - Built from source
+  - type: input
+    id: client
+    attributes:
+      label: Agent or MCP client
+      description: Leave empty if you used the CLI.
+      placeholder: Claude Code, Codex, Cursor…
