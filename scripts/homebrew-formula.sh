@@ -20,7 +20,6 @@ cat <<EOF
 class Lspyx < Formula
   desc "Python code navigation and diagnostics for AI coding agents"
   homepage "https://github.com/iyazerski/lspyx"
-  version "$version"
   license "MIT"
 
   on_macos do
