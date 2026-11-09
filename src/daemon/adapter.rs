@@ -1,28 +1,33 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use super::Declaration;
+use super::watch::WorkspaceWatcher;
 use crate::cli::{GotoTarget, SymbolKindFilter};
 use crate::file_position::FilePosition;
 use crate::lsp::model::{
-    DocumentSymbolNode, LocationRecord, PositionRecord, RangeRecord, RenameEditRecord,
-    ResolvedPosition, SymbolAtRecord, WorkspaceSymbolRecord,
+    DocumentSymbolNode, LocationRecord, PositionRecord, RenameEditRecord, ResolvedPosition,
+    SymbolAtRecord, WorkspaceSymbolRecord,
 };
 use crate::lsp::parse::{
-    extract_symbol_at, find_document_symbol, is_symbol_char, parse_document_symbols,
-    parse_hover_contents, parse_location_response, parse_workspace_edit, parse_workspace_symbols,
+    extract_symbol_at, find_document_symbol, parse_document_symbols, parse_hover_contents,
+    parse_location_response, parse_workspace_edit, parse_workspace_symbols,
 };
-use crate::lsp::{LspSession, SnippetReader, column_to_utf16_offset, nth_line, path_to_file_uri};
-use crate::workspace::{is_python_file, is_walkable_dir, read_dir};
+use crate::lsp::{
+    FileChangeType, LspSession, SnippetReader, column_to_utf16_offset, nth_line, path_to_file_uri,
+};
 
 /// A long-lived ty LSP session that keeps request files synced as open documents.
 #[derive(Debug)]
 pub(super) struct PersistentAdapter {
     session: LspSession,
+    watcher: WorkspaceWatcher,
+    /// Set once forwarding disk changes failed, so ty's view of the disk can't be trusted.
+    sync_failed: bool,
     /// Open documents keyed by their canonical path; request files are canonicalized by clients.
     documents: HashMap<PathBuf, OpenDocument>,
 }
@@ -34,9 +39,17 @@ struct OpenDocument {
 }
 
 impl PersistentAdapter {
-    pub(super) fn new(workspace_root: &Path, ty_binary: &Path) -> Result<Self> {
+    pub(super) fn new(
+        workspace_root: &Path,
+        ty_binary: &Path,
+        cookie_prefix: &Path,
+    ) -> Result<Self> {
+        // Watch before ty reads the workspace, so no edit falls between the two.
+        let watcher = WorkspaceWatcher::new(workspace_root, cookie_prefix)?;
         Ok(Self {
             session: LspSession::start(ty_binary, workspace_root)?,
+            watcher,
+            sync_failed: false,
             documents: HashMap::new(),
         })
     }
@@ -44,6 +57,55 @@ impl PersistentAdapter {
     /// Shut down the LSP session.
     pub(super) fn shutdown(self) {
         self.session.shutdown();
+    }
+
+    /// Fail when the ty session or the file watcher can no longer give correct answers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error describing the broken part.
+    pub(super) fn ensure_healthy(&mut self) -> Result<()> {
+        if self.sync_failed {
+            bail!("failed to forward file changes to ty");
+        }
+        self.session.ensure_running()
+    }
+
+    /// Forward disk changes since the last request to ty and refresh changed open documents.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the watcher lost events or ty can't be notified.
+    pub(super) fn sync_workspace_changes(&mut self) -> Result<()> {
+        // The changes are consumed either way, so a failed sync leaves ty out of date for good.
+        self.forward_workspace_changes()
+            .inspect_err(|_| self.sync_failed = true)
+    }
+
+    fn forward_workspace_changes(&mut self) -> Result<()> {
+        let changes = self.watcher.take_changes()?;
+        if changes.is_empty() {
+            return Ok(());
+        }
+        // Open documents override disk contents in ty, so they need their own update.
+        for (path, change) in &changes {
+            if *change == FileChangeType::Deleted {
+                // A deleted directory takes its open documents with it.
+                let closed: Vec<PathBuf> = self
+                    .documents
+                    .keys()
+                    .filter(|document| document.starts_with(path))
+                    .cloned()
+                    .collect();
+                for document in closed {
+                    self.documents.remove(&document);
+                    self.session.close_file(&document)?;
+                }
+            } else if self.documents.contains_key(path) {
+                self.ensure_file_synced(path)?;
+            }
+        }
+        self.session.change_watched_files(&changes)
     }
 
     /// Identify the symbol at `position`, enriched with its document symbol kind and detail.
@@ -99,77 +161,23 @@ impl PersistentAdapter {
         position: &ResolvedPosition,
         target: GotoTarget,
     ) -> Result<Vec<LocationRecord>> {
-        match target {
-            GotoTarget::Definition => self.definition_locations(position),
-            GotoTarget::Declaration => {
-                let params = self.position_params(position)?;
-                self.locations("textDocument/declaration", params)
-            }
-            GotoTarget::Type => {
-                let params = self.position_params(position)?;
-                self.locations("textDocument/typeDefinition", params)
-            }
-        }
-    }
-
-    pub(super) fn definition_locations(
-        &mut self,
-        position: &ResolvedPosition,
-    ) -> Result<Vec<LocationRecord>> {
-        let params = self.position_params(position)?;
-        let locations = self.locations("textDocument/definition", params)?;
-        let Some(symbol) = position.symbol.as_ref() else {
-            return Ok(locations);
+        let method = match target {
+            GotoTarget::Definition => "textDocument/definition",
+            GotoTarget::Declaration => "textDocument/declaration",
+            GotoTarget::Type => "textDocument/typeDefinition",
         };
-
-        // Follow re-exports: when ty stops at an import line, jump to the unique workspace symbol.
-        let redirected = locations
-            .iter()
-            .any(|location| is_import_location(location, &symbol.name));
-        if !redirected {
-            return Ok(locations);
-        }
-        Ok(match self.unique_workspace_symbol(&symbol.name)? {
-            Some(unique) => vec![LocationRecord {
-                snippet: SnippetReader::default().snippet(&unique.file, unique.range.start.line),
-                file: unique.file,
-                range: unique.range,
-            }],
-            None => locations,
-        })
+        let params = self.position_params(position)?;
+        self.locations(method, params)
     }
 
     pub(super) fn reference_locations(
         &mut self,
-        workspace_root: &Path,
         position: &ResolvedPosition,
         declaration: Declaration,
     ) -> Result<Vec<LocationRecord>> {
         let mut params = self.position_params(position)?;
         params["context"] = json!({ "includeDeclaration": declaration == Declaration::Include });
-        let locations = self.locations("textDocument/references", params)?;
-
-        let unique_files: HashSet<&PathBuf> =
-            locations.iter().map(|location| &location.file).collect();
-        if unique_files.len() > 1 {
-            return Ok(locations);
-        }
-
-        // ty may only report same-file references; widen with a lexical scan for unique symbols.
-        let Some(symbol) = position.symbol.as_ref() else {
-            return Ok(locations);
-        };
-        let Some(canonical_symbol) = self.unique_workspace_symbol(&symbol.name)? else {
-            return Ok(locations);
-        };
-
-        let mut lexical_locations = Vec::new();
-        collect_symbol_occurrences(
-            workspace_root,
-            &canonical_symbol.name,
-            &mut lexical_locations,
-        )?;
-        Ok(merge_locations(locations, lexical_locations))
+        self.locations("textDocument/references", params)
     }
 
     pub(super) fn hover(&mut self, position: &ResolvedPosition) -> Result<String> {
@@ -228,12 +236,6 @@ impl PersistentAdapter {
         parse_workspace_symbols(response)
     }
 
-    fn unique_workspace_symbol(&mut self, query: &str) -> Result<Option<WorkspaceSymbolRecord>> {
-        let symbols = self.workspace_symbol(query)?;
-        Ok(single_match(&symbols, |symbol| symbol.name == query)
-            .or_else(|| single_match(&symbols, |symbol| symbol.name.eq_ignore_ascii_case(query))))
-    }
-
     /// Send a location request and attach source snippets to the results.
     fn locations(&mut self, method: &str, params: Value) -> Result<Vec<LocationRecord>> {
         let mut locations = parse_location_response(self.session.request(method, params)?)?;
@@ -287,13 +289,6 @@ impl PersistentAdapter {
     }
 }
 
-/// Return the only item matching `predicate`, or `None` when there are zero or several.
-fn single_match<T: Clone>(items: &[T], predicate: impl Fn(&T) -> bool) -> Option<T> {
-    let mut matches = items.iter().filter(|item| predicate(item));
-    let first = matches.next()?;
-    matches.next().is_none().then(|| first.clone())
-}
-
 /// Rank symbols: exact matches win outright, then prefix, substring, and other matches.
 fn rank_workspace_symbols(
     query: &str,
@@ -325,98 +320,13 @@ fn rank_workspace_symbols(
     symbols
 }
 
-fn is_import_location(location: &LocationRecord, symbol_name: &str) -> bool {
-    location.snippet.as_deref().is_some_and(|snippet| {
-        (snippet.starts_with("from ") || snippet.starts_with("import "))
-            && snippet.contains(symbol_name)
-    })
-}
-
-fn collect_symbol_occurrences(
-    directory: &Path,
-    symbol_name: &str,
-    locations: &mut Vec<LocationRecord>,
-) -> Result<()> {
-    for entry in read_dir(directory)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if is_walkable_dir(&entry)? {
-            collect_symbol_occurrences(&path, symbol_name, locations)?;
-            continue;
-        }
-        if !entry.file_type()?.is_file() || !is_python_file(&path) {
-            continue;
-        }
-
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        // Skip the per-line scan for the common case of files that never mention the symbol.
-        if !text.contains(symbol_name) {
-            continue;
-        }
-
-        let symbol_width = symbol_name.chars().count();
-        for (line_index, line) in text.lines().enumerate() {
-            for column in symbol_columns(line, symbol_name) {
-                let start = PositionRecord {
-                    line: line_index + 1,
-                    column,
-                };
-                locations.push(LocationRecord {
-                    file: path.clone(),
-                    range: RangeRecord {
-                        start,
-                        end: PositionRecord {
-                            column: column + symbol_width,
-                            ..start
-                        },
-                    },
-                    snippet: Some(line.trim().to_string()),
-                });
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Yield 1-based character columns where `symbol_name` occurs as a whole identifier.
-fn symbol_columns<'a>(line: &'a str, symbol_name: &'a str) -> impl Iterator<Item = usize> + 'a {
-    line.match_indices(symbol_name)
-        .filter(move |(byte_index, _)| {
-            let before = line[..*byte_index].chars().next_back();
-            let after = line[byte_index + symbol_name.len()..].chars().next();
-            !before.is_some_and(is_symbol_char) && !after.is_some_and(is_symbol_char)
-        })
-        .map(|(byte_index, _)| line[..byte_index].chars().count() + 1)
-}
-
-fn merge_locations(
-    mut primary: Vec<LocationRecord>,
-    additional: Vec<LocationRecord>,
-) -> Vec<LocationRecord> {
-    let mut seen: HashSet<(PathBuf, PositionRecord)> = primary
-        .iter()
-        .map(|location| (location.file.clone(), location.range.start))
-        .collect();
-
-    for location in additional {
-        if seen.insert((location.file.clone(), location.range.start)) {
-            primary.push(location);
-        }
-    }
-
-    primary
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use crate::lsp::model::{PositionRecord, RangeRecord, SymbolKind, WorkspaceSymbolRecord};
 
-    use super::{rank_workspace_symbols, symbol_columns};
+    use super::rank_workspace_symbols;
 
     fn symbol(name: &str) -> WorkspaceSymbolRecord {
         let position = PositionRecord { line: 1, column: 1 };
@@ -473,14 +383,6 @@ mod tests {
                 "PreOrder",
                 "execute_orders",
             ]
-        );
-    }
-
-    #[test]
-    fn symbol_columns_match_whole_identifiers_only() {
-        assert_eq!(
-            symbol_columns("Chat(ChatRoom, é.Chat)", "Chat").collect::<Vec<_>>(),
-            vec![1, 18]
         );
     }
 }

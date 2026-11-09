@@ -1,6 +1,7 @@
 mod adapter;
 mod dispatch;
 mod protocol;
+mod watch;
 
 use std::env;
 use std::ffi::OsString;
@@ -10,21 +11,23 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
-use serde_json::Value;
+use serde::Deserialize;
 
 use self::adapter::PersistentAdapter;
 use self::dispatch::{DispatchResult, dispatch_request};
 pub(crate) use self::protocol::{DaemonReply, DaemonRequest, Declaration};
 use self::protocol::{DaemonResponse, read_request, write_frame};
 use crate::debug;
+use crate::update::is_newer;
 use crate::workspace::{cache_dir, locate_ty_binary, workspace_cache_key};
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_IDLE_SECONDS: u64 = 1800;
 const DAEMON_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -69,7 +72,25 @@ pub(crate) struct DaemonLifecycleArgs {
 #[derive(Debug)]
 pub(crate) struct DaemonStatus {
     pub(crate) socket_path: PathBuf,
-    pub(crate) pid: Option<u32>,
+    /// The daemon answering on the socket, if any.
+    pub(crate) daemon: Option<DaemonIdentity>,
+}
+
+/// What a running daemon reports about itself in reply to a ping.
+#[derive(Debug, Deserialize)]
+pub(crate) struct DaemonIdentity {
+    pub(crate) pid: u32,
+    /// The lspyx version serving the workspace; daemons from lspyx 0.6.0 and older don't report it.
+    pub(crate) version: Option<String>,
+}
+
+impl DaemonIdentity {
+    /// Return whether this daemon runs an older lspyx than the caller, or an unknown one.
+    fn is_outdated(&self) -> bool {
+        self.version
+            .as_deref()
+            .is_none_or(|version| is_newer(VERSION, version))
+    }
 }
 
 pub(crate) fn run_daemon_command(
@@ -118,38 +139,41 @@ pub(crate) fn run_via_daemon_reply(
 ) -> Result<DaemonReply> {
     let socket_path = socket_path(workspace_root)?;
 
-    // Reuse an already-running daemon directly to avoid an extra ping roundtrip.
-    let response = match protocol::send_request(&socket_path, &request)? {
-        Some(response) => response,
-        None => {
-            ensure_daemon(workspace_root, DEFAULT_IDLE_SECONDS)?;
-            protocol::send_request(&socket_path, &request)?.ok_or_else(|| {
-                anyhow!(
-                    "daemon started for workspace {} but did not accept the request",
-                    workspace_root.display()
-                )
-            })?
+    // A daemon whose ty session died closes the connection without replying and exits, so
+    // one retry runs the request on a fresh daemon.
+    for _ in 0..2 {
+        ensure_daemon(workspace_root, DEFAULT_IDLE_SECONDS)?;
+        if let Some(response) = protocol::send_request(&socket_path, &request)? {
+            return response.map_err(|error| anyhow!(error));
         }
-    };
-
-    response.map_err(|error| anyhow!(error))
+    }
+    bail!(
+        "daemon for workspace {} closed the connection without replying",
+        workspace_root.display()
+    )
 }
 
 pub(crate) fn daemon_status(workspace_root: &Path) -> Result<DaemonStatus> {
     let socket_path = socket_path(workspace_root)?;
-    let pid = protocol::send_request(&socket_path, &DaemonRequest::Ping)?
+    let daemon = protocol::send_request(&socket_path, &DaemonRequest::Ping)?
         .as_ref()
-        .and_then(response_pid);
+        .and_then(daemon_identity);
 
-    Ok(DaemonStatus { socket_path, pid })
+    Ok(DaemonStatus {
+        socket_path,
+        daemon,
+    })
 }
 
 fn ensure_daemon(workspace_root: &Path, idle_seconds: u64) -> Result<DaemonStatus> {
     // Serialize cold starts so concurrent clients cannot stomp the same socket.
     let _startup_lock = acquire_startup_lock(workspace_root)?;
     let status = daemon_status(workspace_root)?;
-    if status.pid.is_some() {
-        return Ok(status);
+    match &status.daemon {
+        Some(daemon) if !daemon.is_outdated() => return Ok(status),
+        // Replace a daemon left running by an older lspyx, such as after `lspyx update`.
+        Some(_) => stop_daemon_and_wait(workspace_root, &status.socket_path)?,
+        None => {}
     }
 
     if let Err(error) = fs::remove_file(&status.socket_path)
@@ -163,32 +187,65 @@ fn ensure_daemon(workspace_root: &Path, idle_seconds: u64) -> Result<DaemonStatu
         });
     }
 
-    spawn_daemon_process(workspace_root, idle_seconds)?;
+    let log_path = daemon_file(workspace_root, "log")?;
+    let mut child = spawn_daemon_process(workspace_root, idle_seconds, &log_path)?;
 
     let deadline = Instant::now() + DAEMON_STARTUP_TIMEOUT;
-    while Instant::now() < deadline {
+    let problem = loop {
         let status = daemon_status(workspace_root)?;
-        if status.pid.is_some() {
+        if status.daemon.is_some() {
+            // Reap the daemon when it exits so a long-lived caller, such as the MCP server,
+            // never keeps a zombie. The thread dies with short-lived callers, and the daemon is
+            // re-parented.
+            thread::spawn(move || child.wait());
             return Ok(status);
         }
+        if let Some(exit) = child
+            .try_wait()
+            .context("failed to check the daemon process")?
+        {
+            break format!("daemon exited during startup ({exit})");
+        }
+        if Instant::now() >= deadline {
+            break "daemon did not become ready".to_string();
+        }
         thread::sleep(DAEMON_STARTUP_POLL_INTERVAL);
-    }
+    };
 
+    let log = fs::read_to_string(&log_path).unwrap_or_default();
+    let log = log.trim();
+    if log.is_empty() {
+        bail!("{problem} for workspace {}", workspace_root.display());
+    }
     bail!(
-        "daemon did not become ready for workspace {}",
-        workspace_root.display()
+        "{problem} for workspace {}; its log {} says:\n{log}",
+        workspace_root.display(),
+        log_path.display()
     )
 }
 
-/// Start a detached `lspyx daemon serve` process for the workspace.
-fn spawn_daemon_process(workspace_root: &Path, idle_seconds: u64) -> Result<()> {
+/// Start a detached `lspyx daemon serve` process for the workspace, logging stderr to
+/// `log_path` unless debug output is on.
+fn spawn_daemon_process(
+    workspace_root: &Path,
+    idle_seconds: u64,
+    log_path: &Path,
+) -> Result<Child> {
     let current_exe = env::current_exe().context("failed to resolve current lspyx binary")?;
+    let stderr = if debug::enabled() {
+        Stdio::inherit()
+    } else {
+        // Truncate on every start, so the log only covers the current daemon.
+        fs::File::create(log_path)
+            .with_context(|| format!("failed to create {}", log_path.display()))?
+            .into()
+    };
     let mut command = Command::new(current_exe);
     command
         .args(daemon_serve_args(workspace_root, idle_seconds))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(debug::child_stderr());
+        .stderr(stderr);
     // SAFETY: the hook runs in the forked child before exec and only calls `setsid`, which is
     // async-signal-safe and touches no memory shared with the parent.
     unsafe {
@@ -200,12 +257,7 @@ fn spawn_daemon_process(workspace_root: &Path, idle_seconds: u64) -> Result<()> 
             Ok(())
         });
     }
-    let mut child = command.spawn().context("failed to spawn daemon process")?;
-
-    // Reap the daemon when it exits so a long-lived caller, such as the MCP server, never keeps
-    // a zombie. The thread dies with short-lived callers, and the daemon is re-parented.
-    thread::spawn(move || child.wait());
-    Ok(())
+    command.spawn().context("failed to spawn daemon process")
 }
 
 fn daemon_serve_args(workspace_root: &Path, idle_seconds: u64) -> Vec<OsString> {
@@ -224,19 +276,44 @@ fn stop_daemon(workspace_root: &Path) -> Result<bool> {
     Ok(response.is_some())
 }
 
+/// Stop the running daemon and wait until it removes its socket.
+///
+/// A daemon removes its socket as it exits, so starting a new one earlier could lose the new
+/// daemon's socket to that cleanup.
+fn stop_daemon_and_wait(workspace_root: &Path, socket_path: &Path) -> Result<()> {
+    stop_daemon(workspace_root)?;
+    let deadline = Instant::now() + DAEMON_STARTUP_TIMEOUT;
+    while socket_path.exists() {
+        if Instant::now() >= deadline {
+            bail!(
+                "outdated daemon for workspace {} did not stop; run `lspyx daemon stop`",
+                workspace_root.display()
+            );
+        }
+        thread::sleep(DAEMON_STARTUP_POLL_INTERVAL);
+    }
+    Ok(())
+}
+
 fn render_status(status: &DaemonStatus) -> String {
-    let running = status.pid.is_some();
+    let running = status.daemon.is_some();
     let summary = if running {
         "daemon running"
     } else {
         "daemon not running"
     };
-    let pid = status
-        .pid
-        .map_or_else(|| "none".to_string(), |pid| pid.to_string());
+    let (pid, version) = status.daemon.as_ref().map_or_else(
+        || ("none".to_string(), "none"),
+        |daemon| {
+            (
+                daemon.pid.to_string(),
+                daemon.version.as_deref().unwrap_or("unknown"),
+            )
+        },
+    );
 
     format!(
-        "summary: {summary}\nrunning: {running}\npid: {pid}\nsocket: {}",
+        "summary: {summary}\nrunning: {running}\npid: {pid}\nversion: {version}\nsocket: {}",
         status.socket_path.display()
     )
 }
@@ -250,29 +327,38 @@ fn serve_daemon(workspace_root: &Path, idle_seconds: u64) -> Result<()> {
 
     // Refuse to take over a live socket; the startup lock handles stale cleanup before spawn.
     if let Some(response) = protocol::send_request(&socket_path, &DaemonRequest::Ping)? {
-        let pid =
-            response_pid(&response).map_or_else(|| "unknown".to_string(), |pid| pid.to_string());
+        let pid = daemon_identity(&response)
+            .map_or_else(|| "unknown".to_string(), |daemon| daemon.pid.to_string());
         bail!(
             "daemon already running for workspace {} (pid {pid})",
             workspace_root.display()
         );
     }
 
+    let ty_binary = locate_ty_binary(workspace_root)?;
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("failed to bind {}", socket_path.display()))?;
-    listener
+    let cookie_prefix = daemon_file(workspace_root, "cookie")?;
+    let started = listener
         .set_nonblocking(true)
-        .context("failed to configure daemon listener")?;
-
-    let ty_binary = locate_ty_binary(workspace_root)?;
-    let mut adapter = PersistentAdapter::new(workspace_root, &ty_binary)?;
+        .context("failed to configure daemon listener")
+        .and_then(|()| PersistentAdapter::new(workspace_root, &ty_binary, &cookie_prefix));
+    let mut adapter = match started {
+        Ok(adapter) => adapter,
+        Err(error) => {
+            let _ = fs::remove_file(&socket_path);
+            return Err(error);
+        }
+    };
     let idle_timeout = Duration::from_secs(idle_seconds.max(1));
     let mut last_activity = Instant::now();
 
-    loop {
+    // The connection that asked to stop stays open until the socket is gone, so its client
+    // can't start a new daemon that this cleanup would then remove.
+    let last_connection = loop {
         let remaining = idle_timeout.saturating_sub(last_activity.elapsed());
         if remaining.is_zero() {
-            break;
+            break None;
         }
 
         // Block until a client connects or the idle timeout elapses instead of busy polling.
@@ -281,7 +367,7 @@ fn serve_daemon(workspace_root: &Path, idle_seconds: u64) -> Result<()> {
             Ok(false) => continue,
             Err(error) => Err(error),
         };
-        let stream = match accepted {
+        let mut stream = match accepted {
             Ok((stream, _)) => stream,
             Err(error)
                 if matches!(
@@ -300,13 +386,16 @@ fn serve_daemon(workspace_root: &Path, idle_seconds: u64) -> Result<()> {
         };
 
         last_activity = Instant::now();
-        if handle_connection(workspace_root, &mut adapter, stream) == Connection::Shutdown {
-            break;
+        if handle_connection(workspace_root, &mut adapter, &mut stream) == Connection::Shutdown {
+            break Some(stream);
         }
-    }
+    };
 
-    adapter.shutdown();
+    // Remove the socket before the slow ty teardown, so clients start a new daemon right away.
     let _ = fs::remove_file(&socket_path);
+    drop(last_connection);
+    drop(listener);
+    adapter.shutdown();
     Ok(())
 }
 
@@ -318,17 +407,20 @@ enum Connection {
 }
 
 /// Answer one client request; failures are logged so the daemon outlives bad clients.
+///
+/// When the ty session or file watcher is broken, close without replying and shut down, so
+/// the client starts a fresh daemon and retries.
 fn handle_connection(
     workspace_root: &Path,
     adapter: &mut PersistentAdapter,
-    mut stream: UnixStream,
+    stream: &mut UnixStream,
 ) -> Connection {
     if let Err(error) = stream.set_nonblocking(false) {
         debug::log(&format!("failed to configure daemon connection: {error}"));
         return Connection::Continue;
     }
 
-    let request = match read_request(&mut stream) {
+    let request = match read_request(stream) {
         Ok(request) => request,
         Err(error) => {
             debug::log(&format!(
@@ -339,14 +431,23 @@ fn handle_connection(
         }
     };
 
-    let (response, next): (DaemonResponse, Connection) =
-        match dispatch_request(workspace_root, adapter, request) {
-            Ok(DispatchResult::Respond(reply)) => (Ok(reply), Connection::Continue),
-            Ok(DispatchResult::Shutdown(reply)) => (Ok(reply), Connection::Shutdown),
-            Err(error) => (Err(format!("{error:#}")), Connection::Continue),
-        };
+    let result = adapter
+        .ensure_healthy()
+        .and_then(|()| dispatch_request(workspace_root, adapter, request));
+    if let Err(error) = adapter.ensure_healthy() {
+        debug::log(&format!(
+            "stopping daemon for {}: {error:#}; request result: {result:?}",
+            workspace_root.display()
+        ));
+        return Connection::Shutdown;
+    }
+    let (response, next): (DaemonResponse, Connection) = match result {
+        Ok(DispatchResult::Respond(reply)) => (Ok(reply), Connection::Continue),
+        Ok(DispatchResult::Shutdown(reply)) => (Ok(reply), Connection::Shutdown),
+        Err(error) => (Err(format!("{error:#}")), Connection::Continue),
+    };
 
-    if let Err(error) = write_frame(&mut stream, &response) {
+    if let Err(error) = write_frame(stream, &response) {
         debug::log(&format!(
             "failed to write daemon response for {}: {error:#}",
             workspace_root.display()
@@ -409,16 +510,10 @@ fn acquire_startup_lock(workspace_root: &Path) -> Result<fs::File> {
     Ok(file)
 }
 
-/// Return the daemon pid reported in a successful ping or shutdown reply.
-fn response_pid(response: &DaemonResponse) -> Option<u32> {
-    response
-        .as_ref()
-        .ok()?
-        .payload
-        .as_ref()?
-        .get("pid")
-        .and_then(Value::as_u64)
-        .and_then(|pid| u32::try_from(pid).ok())
+/// Return the daemon identity reported in a successful ping or shutdown reply.
+fn daemon_identity(response: &DaemonResponse) -> Option<DaemonIdentity> {
+    let payload = response.as_ref().ok()?.payload.clone()?;
+    serde_json::from_value(payload).ok()
 }
 
 #[cfg(test)]

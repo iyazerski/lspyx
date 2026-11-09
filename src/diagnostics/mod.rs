@@ -236,6 +236,9 @@ fn execute_ruff(
         .arg("json")
         .arg("--color")
         .arg("never")
+        // Override `fix` and `fix-only` from the project config, which would rewrite files.
+        .arg("--no-fix")
+        .arg("--no-fix-only")
         .current_dir(workspace_root);
 
     // Keep Ruff's cache outside the diagnosed workspace.

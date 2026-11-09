@@ -2,7 +2,7 @@ pub(crate) mod model;
 pub(crate) mod parse;
 pub(crate) mod rename;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -12,8 +12,15 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::debug;
 use crate::workspace::ty_server_configuration;
+
+/// An LSP `FileChangeType`: how a watched file changed on disk.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum FileChangeType {
+    Created = 1,
+    Changed = 2,
+    Deleted = 3,
+}
 
 /// A JSON-RPC session with a `ty server` child process over stdio.
 #[derive(Debug)]
@@ -22,6 +29,8 @@ pub(crate) struct LspSession {
     stdin: BufWriter<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     next_id: i64,
+    /// Set when a message failed to go through, so the stream framing can't be trusted.
+    transport_failed: bool,
 }
 
 impl LspSession {
@@ -37,7 +46,8 @@ impl LspSession {
             .env("RUST_LOG", "error")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(debug::child_stderr())
+            // The daemon's stderr is its log, so ty's errors and crashes land there.
+            .stderr(Stdio::inherit())
             .spawn()
             .with_context(|| format!("failed to start {}", binary.display()))?;
 
@@ -48,6 +58,7 @@ impl LspSession {
             stdin: BufWriter::new(child_stdin),
             stdout: BufReader::new(child_stdout),
             next_id: 1,
+            transport_failed: false,
         };
 
         session.initialize(workspace_root)?;
@@ -141,6 +152,30 @@ impl LspSession {
         )
     }
 
+    pub(crate) fn close_file(&mut self, file: &Path) -> Result<()> {
+        self.notify(
+            "textDocument/didClose",
+            json!({ "textDocument": { "uri": path_to_file_uri(file)? } }),
+        )
+    }
+
+    /// Tell the server which files changed on disk, so it stops using cached contents.
+    pub(crate) fn change_watched_files(
+        &mut self,
+        changes: &BTreeMap<PathBuf, FileChangeType>,
+    ) -> Result<()> {
+        let changes = changes
+            .iter()
+            .map(|(path, change)| {
+                Ok(json!({ "uri": path_to_file_uri(path)?, "type": *change as u8 }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.notify(
+            "workspace/didChangeWatchedFiles",
+            json!({ "changes": changes }),
+        )
+    }
+
     /// Send a request and wait for its result, skipping unrelated server messages.
     ///
     /// # Errors
@@ -156,10 +191,13 @@ impl LspSession {
             "method": method,
             "params": params,
         });
-        self.write_message(&payload)?;
+        self.write_message(&payload)
+            .inspect_err(|_| self.transport_failed = true)?;
 
         loop {
-            let mut message = self.read_message()?;
+            let mut message = self
+                .read_message()
+                .inspect_err(|_| self.transport_failed = true)?;
 
             // Skip notifications and server-to-client requests, which carry a `method`
             // and may reuse ids from their own sequence.
@@ -187,6 +225,22 @@ impl LspSession {
             "params": params,
         });
         self.write_message(&payload)
+            .inspect_err(|_| self.transport_failed = true)
+    }
+
+    /// Fail when the server exited or a message failed to go through.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error describing why the session can't serve more requests.
+    pub(crate) fn ensure_running(&mut self) -> Result<()> {
+        if let Some(status) = self.child.try_wait()? {
+            bail!("ty server exited ({status})");
+        }
+        if self.transport_failed {
+            bail!("lost the connection to the ty server");
+        }
+        Ok(())
     }
 
     /// Ask the server to exit and wait for it; teardown is best effort, so failures are ignored.
