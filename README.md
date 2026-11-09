@@ -82,7 +82,7 @@ Grep finds text. lspyx finds the symbol. It skips comments, strings and other th
 <details>
 <summary><b>How does it work?</b></summary>
 
-The first request in a workspace starts a daemon that runs `ty server` and talks to it over the Language Server Protocol. Later requests from the CLI and the MCP server reuse it through a Unix socket in `~/.cache/lspyx`. `diagnostics` runs `ruff check` and `ty check` directly, so they read your `pyproject.toml`, `ruff.toml` and `ty.toml`. To use a specific ty or Ruff, set `LSPYX_TY_PATH` or `LSPYX_RUFF_PATH`.
+The first request in a workspace starts a daemon that runs `ty server` and talks to it over the Language Server Protocol. Later requests from the CLI and the MCP server reuse it through a Unix socket in `~/.cache/lspyx`. The daemon watches the workspace and tells ty about changed files before each request, and it writes errors to a log file next to the socket. `diagnostics` runs `ruff check` and `ty check` directly, so they read your `pyproject.toml`, `ruff.toml` and `ty.toml`. To use a specific ty or Ruff, set `LSPYX_TY_PATH` or `LSPYX_RUFF_PATH`.
 
 </details>
 <details>

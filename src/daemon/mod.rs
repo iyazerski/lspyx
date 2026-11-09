@@ -11,7 +11,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -187,32 +187,65 @@ fn ensure_daemon(workspace_root: &Path, idle_seconds: u64) -> Result<DaemonStatu
         });
     }
 
-    spawn_daemon_process(workspace_root, idle_seconds)?;
+    let log_path = daemon_file(workspace_root, "log")?;
+    let mut child = spawn_daemon_process(workspace_root, idle_seconds, &log_path)?;
 
     let deadline = Instant::now() + DAEMON_STARTUP_TIMEOUT;
-    while Instant::now() < deadline {
+    let problem = loop {
         let status = daemon_status(workspace_root)?;
         if status.daemon.is_some() {
+            // Reap the daemon when it exits so a long-lived caller, such as the MCP server,
+            // never keeps a zombie. The thread dies with short-lived callers, and the daemon is
+            // re-parented.
+            thread::spawn(move || child.wait());
             return Ok(status);
         }
+        if let Some(exit) = child
+            .try_wait()
+            .context("failed to check the daemon process")?
+        {
+            break format!("daemon exited during startup ({exit})");
+        }
+        if Instant::now() >= deadline {
+            break "daemon did not become ready".to_string();
+        }
         thread::sleep(DAEMON_STARTUP_POLL_INTERVAL);
-    }
+    };
 
+    let log = fs::read_to_string(&log_path).unwrap_or_default();
+    let log = log.trim();
+    if log.is_empty() {
+        bail!("{problem} for workspace {}", workspace_root.display());
+    }
     bail!(
-        "daemon did not become ready for workspace {}",
-        workspace_root.display()
+        "{problem} for workspace {}; its log {} says:\n{log}",
+        workspace_root.display(),
+        log_path.display()
     )
 }
 
-/// Start a detached `lspyx daemon serve` process for the workspace.
-fn spawn_daemon_process(workspace_root: &Path, idle_seconds: u64) -> Result<()> {
+/// Start a detached `lspyx daemon serve` process for the workspace, logging stderr to
+/// `log_path` unless debug output is on.
+fn spawn_daemon_process(
+    workspace_root: &Path,
+    idle_seconds: u64,
+    log_path: &Path,
+) -> Result<Child> {
     let current_exe = env::current_exe().context("failed to resolve current lspyx binary")?;
+    let stderr = if debug::enabled() {
+        Stdio::inherit()
+    } else {
+        // Truncate on every start, so the log only covers the current daemon.
+        fs::File::create(log_path)
+            .with_context(|| format!("failed to create {}", log_path.display()))?
+            .into()
+    };
     let mut command = Command::new(current_exe);
     command
         .args(daemon_serve_args(workspace_root, idle_seconds))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(debug::child_stderr());
+        .stderr(stderr);
     // SAFETY: the hook runs in the forked child before exec and only calls `setsid`, which is
     // async-signal-safe and touches no memory shared with the parent.
     unsafe {
@@ -224,12 +257,7 @@ fn spawn_daemon_process(workspace_root: &Path, idle_seconds: u64) -> Result<()> 
             Ok(())
         });
     }
-    let mut child = command.spawn().context("failed to spawn daemon process")?;
-
-    // Reap the daemon when it exits so a long-lived caller, such as the MCP server, never keeps
-    // a zombie. The thread dies with short-lived callers, and the daemon is re-parented.
-    thread::spawn(move || child.wait());
-    Ok(())
+    command.spawn().context("failed to spawn daemon process")
 }
 
 fn daemon_serve_args(workspace_root: &Path, idle_seconds: u64) -> Vec<OsString> {
@@ -307,15 +335,21 @@ fn serve_daemon(workspace_root: &Path, idle_seconds: u64) -> Result<()> {
         );
     }
 
+    let ty_binary = locate_ty_binary(workspace_root)?;
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("failed to bind {}", socket_path.display()))?;
-    listener
-        .set_nonblocking(true)
-        .context("failed to configure daemon listener")?;
-
-    let ty_binary = locate_ty_binary(workspace_root)?;
     let cookie_prefix = daemon_file(workspace_root, "cookie")?;
-    let mut adapter = PersistentAdapter::new(workspace_root, &ty_binary, &cookie_prefix)?;
+    let started = listener
+        .set_nonblocking(true)
+        .context("failed to configure daemon listener")
+        .and_then(|()| PersistentAdapter::new(workspace_root, &ty_binary, &cookie_prefix));
+    let mut adapter = match started {
+        Ok(adapter) => adapter,
+        Err(error) => {
+            let _ = fs::remove_file(&socket_path);
+            return Err(error);
+        }
+    };
     let idle_timeout = Duration::from_secs(idle_seconds.max(1));
     let mut last_activity = Instant::now();
 

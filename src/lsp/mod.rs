@@ -12,7 +12,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::debug;
 use crate::workspace::ty_server_configuration;
 
 /// An LSP `FileChangeType`: how a watched file changed on disk.
@@ -47,7 +46,8 @@ impl LspSession {
             .env("RUST_LOG", "error")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(debug::child_stderr())
+            // The daemon's stderr is its log, so ty's errors and crashes land there.
+            .stderr(Stdio::inherit())
             .spawn()
             .with_context(|| format!("failed to start {}", binary.display()))?;
 

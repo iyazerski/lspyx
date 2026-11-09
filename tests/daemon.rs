@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -31,13 +32,17 @@ impl Project {
         fs::write(path, text).unwrap();
     }
 
-    fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_lspyx"))
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_lspyx"));
+        command
             .args(args)
             .current_dir(self.root.path())
-            .env("HOME", self.home.path())
-            .output()
-            .expect("failed to run lspyx")
+            .env("HOME", self.home.path());
+        command
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.command(args).output().expect("failed to run lspyx")
     }
 
     /// Run lspyx and return its stdout, failing the test when the command fails.
@@ -113,4 +118,23 @@ fn daemon_pid(project: &Project) -> String {
         .find_map(|line| line.strip_prefix("pid: "))
         .unwrap_or_else(|| panic!("no pid in {status}"))
         .to_string()
+}
+
+#[test]
+fn missing_ty_fails_fast_with_the_daemon_error() {
+    let project = Project::new(&[("app.py", "")]);
+    let empty_path = TempDir::new().unwrap();
+    let started = Instant::now();
+
+    let output = project
+        .command(&["find-symbol", "helper"])
+        .env("PATH", empty_path.path())
+        .env_remove("LSPYX_TY_PATH")
+        .output()
+        .expect("failed to run lspyx");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("unable to find ty"), "{stderr}");
+    assert!(started.elapsed() < Duration::from_secs(4), "{stderr}");
 }
