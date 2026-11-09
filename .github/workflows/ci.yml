@@ -20,7 +20,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
       # Integration tests drive the real ty and Ruff.
       - name: Install ty and Ruff
         run: uv tool install ty && uv tool install ruff
