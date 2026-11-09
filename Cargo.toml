@@ -1,6 +1,6 @@
 [package]
 name = "lspyx"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.89"
 description = "Python code navigation, rename previews, and ty/Ruff diagnostics for AI coding agents, as an MCP server and CLI"
