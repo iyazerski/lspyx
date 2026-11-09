@@ -51,7 +51,7 @@ pub(crate) fn run_update() -> Result<String> {
     let _ = fs::remove_dir_all(&staging);
     installed?;
     Ok(format!(
-        "summary: updated lspyx {VERSION} to {latest}\nnote: running daemons and MCP servers use the new version after they restart"
+        "summary: updated lspyx {VERSION} to {latest}\nnote: restart your MCP servers to use the new version; daemons restart by themselves"
     ))
 }
 
@@ -117,7 +117,7 @@ fn run(command: &mut Command, what: &str) -> Result<String> {
 }
 
 /// Return whether version `a` (like `0.5.10`) is newer than `b`, comparing numbers in order.
-fn is_newer(a: &str, b: &str) -> bool {
+pub(crate) fn is_newer(a: &str, b: &str) -> bool {
     let parts = |version: &str| -> Vec<u64> {
         version
             .split('.')

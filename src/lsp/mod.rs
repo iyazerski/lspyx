@@ -30,6 +30,8 @@ pub(crate) struct LspSession {
     stdin: BufWriter<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     next_id: i64,
+    /// Set when a message failed to go through, so the stream framing can't be trusted.
+    transport_failed: bool,
 }
 
 impl LspSession {
@@ -56,6 +58,7 @@ impl LspSession {
             stdin: BufWriter::new(child_stdin),
             stdout: BufReader::new(child_stdout),
             next_id: 1,
+            transport_failed: false,
         };
 
         session.initialize(workspace_root)?;
@@ -188,10 +191,13 @@ impl LspSession {
             "method": method,
             "params": params,
         });
-        self.write_message(&payload)?;
+        self.write_message(&payload)
+            .inspect_err(|_| self.transport_failed = true)?;
 
         loop {
-            let mut message = self.read_message()?;
+            let mut message = self
+                .read_message()
+                .inspect_err(|_| self.transport_failed = true)?;
 
             // Skip notifications and server-to-client requests, which carry a `method`
             // and may reuse ids from their own sequence.
@@ -219,6 +225,22 @@ impl LspSession {
             "params": params,
         });
         self.write_message(&payload)
+            .inspect_err(|_| self.transport_failed = true)
+    }
+
+    /// Fail when the server exited or a message failed to go through.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error describing why the session can't serve more requests.
+    pub(crate) fn ensure_running(&mut self) -> Result<()> {
+        if let Some(status) = self.child.try_wait()? {
+            bail!("ty server exited ({status})");
+        }
+        if self.transport_failed {
+            bail!("lost the connection to the ty server");
+        }
+        Ok(())
     }
 
     /// Ask the server to exit and wait for it; teardown is best effort, so failures are ignored.

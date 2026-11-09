@@ -124,7 +124,7 @@ pub(super) fn send_request(
 
     let response_body = match read_frame(&mut stream) {
         Ok(body) => body,
-        Err(error) if is_unexpected_eof(&error) => return Ok(None),
+        Err(error) if is_closed_without_reply(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
 
@@ -158,8 +158,12 @@ pub(super) fn write_frame(stream: &mut UnixStream, value: &impl Serialize) -> Re
     Ok(())
 }
 
-fn is_unexpected_eof(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<io::Error>()
-        .is_some_and(|source| source.kind() == io::ErrorKind::UnexpectedEof)
+/// Return whether the daemon hung up before replying, such as when it was stopping.
+fn is_closed_without_reply(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<io::Error>().is_some_and(|source| {
+        matches!(
+            source.kind(),
+            io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
+        )
+    })
 }

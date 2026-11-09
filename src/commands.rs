@@ -37,7 +37,7 @@ fn run_doctor(workspace: Option<&Path>) -> Result<String> {
     let workspace_root = workspace_root(workspace, None)?;
     let ty = locate_ty_binary(&workspace_root).ok();
     let ruff = locate_ruff_binary(&workspace_root).ok();
-    let daemon_pid = daemon::daemon_status(&workspace_root)?.pid;
+    let daemon = daemon::daemon_status(&workspace_root)?.daemon;
 
     let availability = |path: Option<&Path>| match path {
         Some(_) => "available",
@@ -56,7 +56,7 @@ fn run_doctor(workspace: Option<&Path>) -> Result<String> {
         Some(path) => format!("{name}: found at {}", path.display()),
         None => format!("{name}: not found"),
     };
-    let (daemon_summary, daemon_line) = match daemon_pid {
+    let (daemon_summary, daemon_line) = match daemon.map(|daemon| daemon.pid) {
         Some(pid) => ("daemon running", format!("daemon: running (pid {pid})")),
         None => ("daemon not running", "daemon: not running".to_string()),
     };

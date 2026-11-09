@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use super::Declaration;
@@ -27,6 +27,8 @@ use crate::workspace::{is_python_file, is_walkable_dir, read_dir};
 pub(super) struct PersistentAdapter {
     session: LspSession,
     watcher: WorkspaceWatcher,
+    /// Set once the watcher missed changes, so ty's view of the disk can't be trusted.
+    watcher_failed: bool,
     /// Open documents keyed by their canonical path; request files are canonicalized by clients.
     documents: HashMap<PathBuf, OpenDocument>,
 }
@@ -48,6 +50,7 @@ impl PersistentAdapter {
         Ok(Self {
             session: LspSession::start(ty_binary, workspace_root)?,
             watcher,
+            watcher_failed: false,
             documents: HashMap::new(),
         })
     }
@@ -57,13 +60,28 @@ impl PersistentAdapter {
         self.session.shutdown();
     }
 
+    /// Fail when the ty session or the file watcher can no longer give correct answers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error describing the broken part.
+    pub(super) fn ensure_healthy(&mut self) -> Result<()> {
+        if self.watcher_failed {
+            bail!("the file watcher missed changes");
+        }
+        self.session.ensure_running()
+    }
+
     /// Forward disk changes since the last request to ty and refresh changed open documents.
     ///
     /// # Errors
     ///
     /// Returns an error when the watcher lost events or ty can't be notified.
     pub(super) fn sync_workspace_changes(&mut self) -> Result<()> {
-        let changes = self.watcher.take_changes()?;
+        let changes = self
+            .watcher
+            .take_changes()
+            .inspect_err(|_| self.watcher_failed = true)?;
         if changes.is_empty() {
             return Ok(());
         }

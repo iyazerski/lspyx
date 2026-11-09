@@ -88,3 +88,29 @@ fn daemon_sees_files_changed_after_it_started() {
     let found = project.lspyx(&["find-symbol", "brand_new"]);
     assert!(found.starts_with("no symbols found"), "{found}");
 }
+
+#[test]
+fn request_after_ty_crash_runs_on_a_fresh_daemon() {
+    let project = Project::new(&[("app.py", "def helper():\n    pass\n")]);
+    project.lspyx(&["find-symbol", "helper"]);
+    let pid = daemon_pid(&project);
+    let killed = Command::new("pkill")
+        .args(["-9", "-P", &pid])
+        .status()
+        .expect("failed to run pkill");
+    assert!(killed.success(), "ty wasn't running under daemon {pid}");
+
+    let found = project.lspyx(&["find-symbol", "helper"]);
+
+    assert!(found.starts_with("1 symbol"), "{found}");
+    assert_ne!(daemon_pid(&project), pid);
+}
+
+fn daemon_pid(project: &Project) -> String {
+    let status = project.lspyx(&["daemon", "status"]);
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("pid: "))
+        .unwrap_or_else(|| panic!("no pid in {status}"))
+        .to_string()
+}

@@ -30,7 +30,7 @@ pub(super) fn dispatch_request(
     adapter: &mut PersistentAdapter,
     request: DaemonRequest,
 ) -> Result<DispatchResult> {
-    let pid_payload = || json!({ "pid": std::process::id() });
+    let pid_payload = || json!({ "pid": std::process::id(), "version": env!("CARGO_PKG_VERSION") });
     if !matches!(request, DaemonRequest::Ping | DaemonRequest::Shutdown) {
         adapter.sync_workspace_changes()?;
     }
