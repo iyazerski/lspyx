@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -19,16 +19,24 @@ const CONFIG_FILE_NAMES: [&str; 2] = ["pyproject.toml", "ty.toml"];
 /// How long to wait for the watcher to report a cookie file; it normally takes milliseconds.
 const COOKIE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// A recursive watcher over the workspace that queues events until the next request.
+/// What the watcher thread passes on; irrelevant events are dropped there, so the queue only
+/// grows with changes ty needs.
+#[derive(Debug)]
+enum WatchMessage {
+    Change { path: PathBuf, created: bool },
+    Cookie(PathBuf),
+    Failed(String),
+}
+
+/// A recursive watcher over the workspace that queues changes until the next request.
 #[derive(Debug)]
 pub(super) struct WorkspaceWatcher {
-    workspace_root: PathBuf,
     /// Prefix for cookie files in a watched directory outside the workspace.
     cookie_prefix: PathBuf,
     cookies_written: u64,
     // Dropping the watcher stops the events.
     _watcher: RecommendedWatcher,
-    events: Receiver<notify::Result<Event>>,
+    messages: Receiver<WatchMessage>,
 }
 
 impl WorkspaceWatcher {
@@ -50,9 +58,14 @@ impl WorkspaceWatcher {
                 .context("cookie path has no file name")?,
         );
 
-        let (sender, events) = mpsc::channel();
-        let mut watcher =
-            notify::recommended_watcher(sender).context("failed to create file watcher")?;
+        let (sender, messages) = mpsc::channel();
+        let filter = EventFilter {
+            workspace_root: workspace_root.to_path_buf(),
+            cookie_dir: cookie_dir.clone(),
+            sender,
+        };
+        let mut watcher = notify::recommended_watcher(move |event| filter.forward(event))
+            .context("failed to create file watcher")?;
         for (path, mode) in [
             (workspace_root, RecursiveMode::Recursive),
             (cookie_dir.as_path(), RecursiveMode::NonRecursive),
@@ -62,23 +75,25 @@ impl WorkspaceWatcher {
                 .with_context(|| format!("failed to watch {}", path.display()))?;
         }
         Ok(Self {
-            workspace_root: workspace_root.to_path_buf(),
             cookie_prefix,
             cookies_written: 0,
             _watcher: watcher,
-            events,
+            messages,
         })
     }
 
-    /// Collect every change made before this call, with the current change type of each file.
+    /// Collect every change made before this call, with the current change type of each path.
+    ///
+    /// Paths are Python and config files, or directories that were created, moved, or deleted.
     ///
     /// # Errors
     ///
     /// Returns an error when the watcher failed, dropped events, or stopped reporting.
     pub(super) fn take_changes(&mut self) -> Result<BTreeMap<PathBuf, FileChangeType>> {
-        // Watchers deliver events late but in order, so once a fresh cookie file shows up,
-        // every earlier workspace change has been seen. Each cookie gets a new name, so
-        // leftover events from older cookies can't end the wait early.
+        // Once a fresh cookie file shows up, earlier workspace changes have been reported:
+        // inotify keeps events in order, and FSEvents does in practice, though it doesn't
+        // promise it. Each cookie gets a new name, so leftover events from older cookies
+        // can't end the wait early.
         self.cookies_written += 1;
         let mut cookie = self.cookie_prefix.clone().into_os_string();
         cookie.push(format!("-{}", self.cookies_written));
@@ -88,7 +103,7 @@ impl WorkspaceWatcher {
         let _ = fs::remove_file(&cookie);
         let (changed, created) = collected?;
 
-        // Events coalesce and arrive late, so the file's current state decides the change type.
+        // Events coalesce and arrive late, so the path's current state decides the change type.
         Ok(changed
             .into_iter()
             .map(|path| {
@@ -104,57 +119,94 @@ impl WorkspaceWatcher {
             .collect())
     }
 
-    /// Read events until one names `cookie`, returning the changed and created relevant files.
+    /// Read messages until `cookie` shows up, returning the changed and created paths.
     fn collect_until(&self, cookie: &Path) -> Result<(HashSet<PathBuf>, HashSet<PathBuf>)> {
         let deadline = Instant::now() + COOKIE_TIMEOUT;
         let mut changed = HashSet::new();
         let mut created = HashSet::new();
         loop {
-            let event = match self
-                .events
+            match self
+                .messages
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             {
-                Ok(event) => event.context("file watcher failed")?,
+                Ok(WatchMessage::Change {
+                    path,
+                    created: is_creation,
+                }) => {
+                    if is_creation {
+                        created.insert(path.clone());
+                    }
+                    changed.insert(path);
+                }
+                Ok(WatchMessage::Cookie(path)) if path == cookie => {
+                    return Ok((changed, created));
+                }
+                Ok(WatchMessage::Cookie(_)) => {}
+                Ok(WatchMessage::Failed(error)) => bail!("file watcher failed: {error}"),
                 Err(RecvTimeoutError::Timeout) => bail!("file watcher stopped reporting changes"),
                 Err(RecvTimeoutError::Disconnected) => bail!("file watcher stopped"),
-            };
-            if event.need_rescan() {
-                bail!("file watcher dropped events");
-            }
-            if event.paths.iter().any(|path| path == cookie) {
-                return Ok((changed, created));
-            }
-            let is_creation = match event.kind {
-                EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_)) => true,
-                EventKind::Modify(_) | EventKind::Remove(_) | EventKind::Any => false,
-                EventKind::Access(_) | EventKind::Other => continue,
-            };
-            for path in event
-                .paths
-                .into_iter()
-                .filter(|path| is_relevant(&self.workspace_root, path))
-            {
-                if is_creation {
-                    created.insert(path.clone());
-                }
-                changed.insert(path);
             }
         }
     }
 }
 
-/// Return whether ty cares about `path`: Python sources and config outside ignored directories.
-fn is_relevant(workspace_root: &Path, path: &Path) -> bool {
-    let Ok(relative) = path.strip_prefix(workspace_root) else {
-        return false;
-    };
-    let wanted = is_python_file(relative)
-        || relative
+/// Runs on the watcher thread and passes on only the events the daemon needs.
+struct EventFilter {
+    workspace_root: PathBuf,
+    cookie_dir: PathBuf,
+    sender: Sender<WatchMessage>,
+}
+
+impl EventFilter {
+    fn forward(&self, event: notify::Result<Event>) {
+        // A closed channel means the daemon is shutting down, so send results are ignored.
+        let event = match event {
+            Ok(event) if event.need_rescan() => {
+                let _ = self
+                    .sender
+                    .send(WatchMessage::Failed("dropped events".to_string()));
+                return;
+            }
+            Ok(event) => event,
+            Err(error) => {
+                let _ = self.sender.send(WatchMessage::Failed(error.to_string()));
+                return;
+            }
+        };
+        let (created, structural) = match event.kind {
+            EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_)) => (true, true),
+            EventKind::Remove(_) => (false, true),
+            EventKind::Modify(_) | EventKind::Any => (false, false),
+            EventKind::Access(_) | EventKind::Other => return,
+        };
+        for path in event.paths {
+            let message = if path.parent() == Some(self.cookie_dir.as_path()) {
+                WatchMessage::Cookie(path)
+            } else if self.is_relevant(&path, structural) {
+                WatchMessage::Change { path, created }
+            } else {
+                continue;
+            };
+            let _ = self.sender.send(message);
+        }
+    }
+
+    /// Return whether ty needs to hear about `path`: a Python or config file, or a directory
+    /// that appeared or disappeared, outside ignored directories.
+    fn is_relevant(&self, path: &Path, structural: bool) -> bool {
+        let Ok(relative) = path.strip_prefix(&self.workspace_root) else {
+            return false;
+        };
+        if relative.iter().any(is_ignored_dir_name) {
+            return false;
+        }
+        let is_config = relative
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| CONFIG_FILE_NAMES.contains(&name));
-    wanted
-        && !relative
-            .parent()
-            .is_some_and(|parent| parent.iter().any(is_ignored_dir_name))
+        // Moving a directory reports only the directory, so ty must rescan it. A deleted
+        // path can't be checked, so one without an extension is taken for a directory.
+        let is_directory = || path.is_dir() || (!path.exists() && relative.extension().is_none());
+        is_python_file(relative) || is_config || (structural && is_directory())
+    }
 }

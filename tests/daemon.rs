@@ -92,6 +92,11 @@ fn daemon_sees_files_changed_after_it_started() {
     fs::remove_file(project.path().join("pkg/c.py")).unwrap();
     let found = project.lspyx(&["find-symbol", "brand_new"]);
     assert!(found.starts_with("no symbols found"), "{found}");
+
+    // Moving a directory reports only the directory, not the files inside it.
+    fs::rename(project.path().join("pkg"), project.path().join("moved")).unwrap();
+    let found = project.lspyx(&["find-symbol", "fresh"]);
+    assert!(found.contains("moved/a.py"), "{found}");
 }
 
 #[test]

@@ -26,8 +26,8 @@ use crate::lsp::{
 pub(super) struct PersistentAdapter {
     session: LspSession,
     watcher: WorkspaceWatcher,
-    /// Set once the watcher missed changes, so ty's view of the disk can't be trusted.
-    watcher_failed: bool,
+    /// Set once forwarding disk changes failed, so ty's view of the disk can't be trusted.
+    sync_failed: bool,
     /// Open documents keyed by their canonical path; request files are canonicalized by clients.
     documents: HashMap<PathBuf, OpenDocument>,
 }
@@ -49,7 +49,7 @@ impl PersistentAdapter {
         Ok(Self {
             session: LspSession::start(ty_binary, workspace_root)?,
             watcher,
-            watcher_failed: false,
+            sync_failed: false,
             documents: HashMap::new(),
         })
     }
@@ -65,8 +65,8 @@ impl PersistentAdapter {
     ///
     /// Returns an error describing the broken part.
     pub(super) fn ensure_healthy(&mut self) -> Result<()> {
-        if self.watcher_failed {
-            bail!("the file watcher missed changes");
+        if self.sync_failed {
+            bail!("failed to forward file changes to ty");
         }
         self.session.ensure_running()
     }
@@ -77,22 +77,31 @@ impl PersistentAdapter {
     ///
     /// Returns an error when the watcher lost events or ty can't be notified.
     pub(super) fn sync_workspace_changes(&mut self) -> Result<()> {
-        let changes = self
-            .watcher
-            .take_changes()
-            .inspect_err(|_| self.watcher_failed = true)?;
+        // The changes are consumed either way, so a failed sync leaves ty out of date for good.
+        self.forward_workspace_changes()
+            .inspect_err(|_| self.sync_failed = true)
+    }
+
+    fn forward_workspace_changes(&mut self) -> Result<()> {
+        let changes = self.watcher.take_changes()?;
         if changes.is_empty() {
             return Ok(());
         }
         // Open documents override disk contents in ty, so they need their own update.
         for (path, change) in &changes {
-            if !self.documents.contains_key(path) {
-                continue;
-            }
             if *change == FileChangeType::Deleted {
-                self.documents.remove(path);
-                self.session.close_file(path)?;
-            } else {
+                // A deleted directory takes its open documents with it.
+                let closed: Vec<PathBuf> = self
+                    .documents
+                    .keys()
+                    .filter(|document| document.starts_with(path))
+                    .cloned()
+                    .collect();
+                for document in closed {
+                    self.documents.remove(&document);
+                    self.session.close_file(&document)?;
+                }
+            } else if self.documents.contains_key(path) {
                 self.ensure_file_synced(path)?;
             }
         }
