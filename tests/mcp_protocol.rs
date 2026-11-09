@@ -1,3 +1,4 @@
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -5,9 +6,12 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use tempfile::TempDir;
 
 struct McpServer {
     child: Child,
+    // Holds the daemon sockets and caches, so tests never touch the real home directory.
+    _home: TempDir,
     stdin: ChildStdin,
     responses: Receiver<String>,
     reader: Option<JoinHandle<()>>,
@@ -15,9 +19,11 @@ struct McpServer {
 
 impl McpServer {
     fn start() -> Self {
+        let home = TempDir::new().expect("failed to create test home");
         let mut child = Command::new(env!("CARGO_BIN_EXE_lspyx"))
             .arg("mcp")
             .arg("serve")
+            .env("HOME", home.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -38,6 +44,7 @@ impl McpServer {
 
         Self {
             child,
+            _home: home,
             stdin,
             responses,
             reader: Some(reader),
@@ -76,10 +83,21 @@ impl McpServer {
         self.stdin.flush().expect("failed to flush mcp message");
     }
 
+    /// Call `tool` with `arguments` and return the JSON-RPC response.
+    fn call_tool(&mut self, tool: &str, arguments: Value) -> Value {
+        self.send(json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": { "name": tool, "arguments": arguments },
+        }));
+        self.read_response()
+    }
+
     fn read_response(&self) -> Value {
         let line = self
             .responses
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(30))
             .expect("mcp server did not respond");
         serde_json::from_str(&line).expect("mcp server returned invalid JSON")
     }
@@ -268,4 +286,35 @@ fn mcp_routes_explore_invalid_params() {
         "unexpected tools/call error: {response}"
     );
     assert_ne!(message, "tools/call");
+}
+
+#[test]
+fn mcp_diagnostics_report_findings_without_applying_configured_fixes() {
+    let workspace = TempDir::new().expect("failed to create workspace");
+    fs::write(
+        workspace.path().join("pyproject.toml"),
+        "[tool.ruff]\nfix = true\n",
+    )
+    .unwrap();
+    let source = "import os\n\nx = 1\n";
+    fs::write(workspace.path().join("app.py"), source).unwrap();
+    let mut server = McpServer::start();
+    server.initialize();
+
+    let response = server.call_tool(
+        "diagnostics",
+        json!({ "workspace": workspace.path(), "path": "app.py" }),
+    );
+
+    let codes: Vec<&str> = response["result"]["structuredContent"]["diagnostics"]
+        .as_array()
+        .unwrap_or_else(|| panic!("diagnostics missing: {response}"))
+        .iter()
+        .filter_map(|diagnostic| diagnostic["code"].as_str())
+        .collect();
+    assert!(codes.contains(&"F401"), "{response}");
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("app.py")).unwrap(),
+        source
+    );
 }
