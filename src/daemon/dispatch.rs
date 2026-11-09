@@ -62,7 +62,7 @@ pub(super) fn dispatch_request(
             limit,
         } => {
             let position = adapter.resolve_position(&position)?;
-            let locations = adapter.reference_locations(workspace_root, &position, declaration)?;
+            let locations = adapter.reference_locations(&position, declaration)?;
             render_locations(workspace_root, position, None, locations, limit)
         }
         DaemonRequest::FindSymbol { query, kind, limit } => {
@@ -145,8 +145,8 @@ fn explore(
 
     // Each rendered section owns its position, so the copies are deliberate.
     let inspect_text = inspect(workspace_root, adapter, position.clone())?;
-    let definitions = adapter.definition_locations(&position)?;
-    let usages = adapter.reference_locations(workspace_root, &position, Declaration::Include)?;
+    let definitions = adapter.goto_locations(&position, GotoTarget::Definition)?;
+    let usages = adapter.reference_locations(&position, Declaration::Include)?;
     let definition_text = render_locations(
         workspace_root,
         position.clone(),

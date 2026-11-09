@@ -335,7 +335,7 @@ pub(crate) fn find_document_symbol(
     find_document_symbol(&symbol.children, position).or(Some(symbol))
 }
 
-pub(crate) fn is_symbol_char(value: char) -> bool {
+fn is_symbol_char(value: char) -> bool {
     value == '_' || value.is_alphanumeric()
 }
 

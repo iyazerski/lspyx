@@ -138,3 +138,19 @@ fn missing_ty_fails_fast_with_the_daemon_error() {
     assert!(stderr.contains("unable to find ty"), "{stderr}");
     assert!(started.elapsed() < Duration::from_secs(4), "{stderr}");
 }
+
+#[test]
+fn usages_skip_same_named_text_in_other_files() {
+    let project = Project::new(&[
+        ("app.py", "def helper():\n    pass\n\n\nhelper()\n"),
+        (
+            "notes.py",
+            "# helper is mentioned here\nlabel = \"helper\"\n",
+        ),
+    ]);
+
+    let usages = project.lspyx(&["usages", "app.py:1:5"]);
+
+    assert!(usages.starts_with("2 usages of helper"), "{usages}");
+    assert!(!usages.contains("notes.py"), "{usages}");
+}

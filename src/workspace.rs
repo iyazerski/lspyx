@@ -183,12 +183,12 @@ fn contains_python_project_hint(path: &Path) -> Result<bool> {
 }
 
 /// List a directory with a path-aware error message.
-pub(crate) fn read_dir(path: &Path) -> Result<fs::ReadDir> {
+fn read_dir(path: &Path) -> Result<fs::ReadDir> {
     fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))
 }
 
 /// Return whether a directory entry is a real (non-symlink) directory worth scanning.
-pub(crate) fn is_walkable_dir(entry: &DirEntry) -> Result<bool> {
+fn is_walkable_dir(entry: &DirEntry) -> Result<bool> {
     // `file_type` does not follow symlinks, which avoids an extra stat and symlink cycles.
     Ok(entry.file_type()?.is_dir() && !is_ignored_dir_name(&entry.file_name()))
 }
