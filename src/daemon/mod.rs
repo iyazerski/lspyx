@@ -1,6 +1,7 @@
 mod adapter;
 mod dispatch;
 mod protocol;
+mod watch;
 
 use std::env;
 use std::ffi::OsString;
@@ -265,7 +266,8 @@ fn serve_daemon(workspace_root: &Path, idle_seconds: u64) -> Result<()> {
         .context("failed to configure daemon listener")?;
 
     let ty_binary = locate_ty_binary(workspace_root)?;
-    let mut adapter = PersistentAdapter::new(workspace_root, &ty_binary)?;
+    let cookie_prefix = daemon_file(workspace_root, "cookie")?;
+    let mut adapter = PersistentAdapter::new(workspace_root, &ty_binary, &cookie_prefix)?;
     let idle_timeout = Duration::from_secs(idle_seconds.max(1));
     let mut last_activity = Instant::now();
 

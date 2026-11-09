@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::collections::hash_map::DefaultHasher;
 use std::env;
+use std::ffi::OsStr;
 use std::fs::{self, DirEntry};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -189,22 +190,26 @@ pub(crate) fn read_dir(path: &Path) -> Result<fs::ReadDir> {
 /// Return whether a directory entry is a real (non-symlink) directory worth scanning.
 pub(crate) fn is_walkable_dir(entry: &DirEntry) -> Result<bool> {
     // `file_type` does not follow symlinks, which avoids an extra stat and symlink cycles.
-    Ok(entry.file_type()?.is_dir()
-        && !matches!(
-            entry.file_name().to_str(),
-            Some(
-                ".git"
-                    | ".hg"
-                    | ".mypy_cache"
-                    | ".pytest_cache"
-                    | ".ruff_cache"
-                    | ".tox"
-                    | ".venv"
-                    | "__pycache__"
-                    | "node_modules"
-                    | "target"
-            )
-        ))
+    Ok(entry.file_type()?.is_dir() && !is_ignored_dir_name(&entry.file_name()))
+}
+
+/// Return whether a directory with this name holds tool state or dependencies, not project code.
+pub(crate) fn is_ignored_dir_name(name: &OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some(
+            ".git"
+                | ".hg"
+                | ".mypy_cache"
+                | ".pytest_cache"
+                | ".ruff_cache"
+                | ".tox"
+                | ".venv"
+                | "__pycache__"
+                | "node_modules"
+                | "target"
+        )
+    )
 }
 
 pub(crate) fn is_python_file(path: &Path) -> bool {

@@ -31,6 +31,9 @@ pub(super) fn dispatch_request(
     request: DaemonRequest,
 ) -> Result<DispatchResult> {
     let pid_payload = || json!({ "pid": std::process::id() });
+    if !matches!(request, DaemonRequest::Ping | DaemonRequest::Shutdown) {
+        adapter.sync_workspace_changes()?;
+    }
     let text = match request {
         DaemonRequest::Ping => {
             return Ok(DispatchResult::Respond(DaemonReply::with_payload(

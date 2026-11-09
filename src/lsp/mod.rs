@@ -2,7 +2,7 @@ pub(crate) mod model;
 pub(crate) mod parse;
 pub(crate) mod rename;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,6 +14,14 @@ use url::Url;
 
 use crate::debug;
 use crate::workspace::ty_server_configuration;
+
+/// An LSP `FileChangeType`: how a watched file changed on disk.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum FileChangeType {
+    Created = 1,
+    Changed = 2,
+    Deleted = 3,
+}
 
 /// A JSON-RPC session with a `ty server` child process over stdio.
 #[derive(Debug)]
@@ -138,6 +146,30 @@ impl LspSession {
                     }
                 ],
             }),
+        )
+    }
+
+    pub(crate) fn close_file(&mut self, file: &Path) -> Result<()> {
+        self.notify(
+            "textDocument/didClose",
+            json!({ "textDocument": { "uri": path_to_file_uri(file)? } }),
+        )
+    }
+
+    /// Tell the server which files changed on disk, so it stops using cached contents.
+    pub(crate) fn change_watched_files(
+        &mut self,
+        changes: &BTreeMap<PathBuf, FileChangeType>,
+    ) -> Result<()> {
+        let changes = changes
+            .iter()
+            .map(|(path, change)| {
+                Ok(json!({ "uri": path_to_file_uri(path)?, "type": *change as u8 }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.notify(
+            "workspace/didChangeWatchedFiles",
+            json!({ "changes": changes }),
         )
     }
 

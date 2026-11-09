@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use super::Declaration;
+use super::watch::WorkspaceWatcher;
 use crate::cli::{GotoTarget, SymbolKindFilter};
 use crate::file_position::FilePosition;
 use crate::lsp::model::{
@@ -16,13 +17,16 @@ use crate::lsp::parse::{
     extract_symbol_at, find_document_symbol, is_symbol_char, parse_document_symbols,
     parse_hover_contents, parse_location_response, parse_workspace_edit, parse_workspace_symbols,
 };
-use crate::lsp::{LspSession, SnippetReader, column_to_utf16_offset, nth_line, path_to_file_uri};
+use crate::lsp::{
+    FileChangeType, LspSession, SnippetReader, column_to_utf16_offset, nth_line, path_to_file_uri,
+};
 use crate::workspace::{is_python_file, is_walkable_dir, read_dir};
 
 /// A long-lived ty LSP session that keeps request files synced as open documents.
 #[derive(Debug)]
 pub(super) struct PersistentAdapter {
     session: LspSession,
+    watcher: WorkspaceWatcher,
     /// Open documents keyed by their canonical path; request files are canonicalized by clients.
     documents: HashMap<PathBuf, OpenDocument>,
 }
@@ -34,9 +38,16 @@ struct OpenDocument {
 }
 
 impl PersistentAdapter {
-    pub(super) fn new(workspace_root: &Path, ty_binary: &Path) -> Result<Self> {
+    pub(super) fn new(
+        workspace_root: &Path,
+        ty_binary: &Path,
+        cookie_prefix: &Path,
+    ) -> Result<Self> {
+        // Watch before ty reads the workspace, so no edit falls between the two.
+        let watcher = WorkspaceWatcher::new(workspace_root, cookie_prefix)?;
         Ok(Self {
             session: LspSession::start(ty_binary, workspace_root)?,
+            watcher,
             documents: HashMap::new(),
         })
     }
@@ -44,6 +55,31 @@ impl PersistentAdapter {
     /// Shut down the LSP session.
     pub(super) fn shutdown(self) {
         self.session.shutdown();
+    }
+
+    /// Forward disk changes since the last request to ty and refresh changed open documents.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the watcher lost events or ty can't be notified.
+    pub(super) fn sync_workspace_changes(&mut self) -> Result<()> {
+        let changes = self.watcher.take_changes()?;
+        if changes.is_empty() {
+            return Ok(());
+        }
+        // Open documents override disk contents in ty, so they need their own update.
+        for (path, change) in &changes {
+            if !self.documents.contains_key(path) {
+                continue;
+            }
+            if *change == FileChangeType::Deleted {
+                self.documents.remove(path);
+                self.session.close_file(path)?;
+            } else {
+                self.ensure_file_synced(path)?;
+            }
+        }
+        self.session.change_watched_files(&changes)
     }
 
     /// Identify the symbol at `position`, enriched with its document symbol kind and detail.
