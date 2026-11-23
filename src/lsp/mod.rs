@@ -301,11 +301,12 @@ pub(crate) struct SnippetReader {
 impl SnippetReader {
     /// Return the trimmed 1-based `line` of `path`, or `None` when it cannot be read.
     pub(crate) fn snippet(&mut self, path: &Path, line: usize) -> Option<String> {
-        let text = self
-            .files
-            .entry(path.to_path_buf())
-            .or_insert_with(|| fs::read_to_string(path).ok());
-        nth_line(text.as_deref()?, line).map(|value| value.trim().to_string())
+        if !self.files.contains_key(path) {
+            self.files
+                .insert(path.to_path_buf(), fs::read_to_string(path).ok());
+        }
+        let text = self.files.get(path)?.as_deref()?;
+        nth_line(text, line).map(|value| value.trim().to_string())
     }
 }
 

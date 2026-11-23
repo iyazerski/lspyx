@@ -7,7 +7,7 @@ use anyhow::{Context, Error, Result, bail};
 use serde::{Deserialize, Serialize};
 
 /// A 1-based line and column in `file`.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FilePosition {
     pub(crate) file: PathBuf,
     pub(crate) line: usize,
@@ -37,8 +37,10 @@ impl FromStr for FilePosition {
     /// Parse `file:line:column`, splitting from the right so paths may contain colons.
     fn from_str(input: &str) -> Result<Self> {
         let format_error = || format!("expected FILE:LINE:COLUMN format, got: {input}");
-        let parts: Vec<&str> = input.rsplitn(3, ':').collect();
-        let [column, line, file] = parts.as_slice() else {
+        let Some((rest, column)) = input.rsplit_once(':') else {
+            bail!(format_error());
+        };
+        let Some((file, line)) = rest.rsplit_once(':') else {
             bail!(format_error());
         };
         if file.is_empty() {

@@ -91,14 +91,10 @@ impl PersistentAdapter {
         for (path, change) in &changes {
             if *change == FileChangeType::Deleted {
                 // A deleted directory takes its open documents with it.
-                let closed: Vec<PathBuf> = self
+                for (document, _) in self
                     .documents
-                    .keys()
-                    .filter(|document| document.starts_with(path))
-                    .cloned()
-                    .collect();
-                for document in closed {
-                    self.documents.remove(&document);
+                    .extract_if(|document, _| document.starts_with(path))
+                {
                     self.session.close_file(&document)?;
                 }
             } else if self.documents.contains_key(path) {
@@ -109,21 +105,21 @@ impl PersistentAdapter {
     }
 
     /// Identify the symbol at `position`, enriched with its document symbol kind and detail.
-    pub(super) fn resolve_position(&mut self, position: &FilePosition) -> Result<ResolvedPosition> {
+    pub(super) fn resolve_position(&mut self, position: FilePosition) -> Result<ResolvedPosition> {
         let FilePosition { file, line, column } = position;
-        self.ensure_file_synced(file)?;
-        let line_text = self.document_line(file, *line)?;
+        self.ensure_file_synced(&file)?;
+        let line_text = self.document_line(&file, line)?;
         let source_line = line_text.trim().to_string();
-        let symbol = extract_symbol_at(line_text, *column)?;
+        let symbol = extract_symbol_at(line_text, column)?;
         let resolved_column = symbol.as_ref().map(|value| value.start_column);
         let symbol = symbol
-            .map(|symbol| self.describe_symbol(file, *line, symbol))
+            .map(|symbol| self.describe_symbol(&file, line, symbol))
             .transpose()?;
 
         Ok(ResolvedPosition {
-            file: file.clone(),
-            line: *line,
-            requested_column: *column,
+            file,
+            line,
+            requested_column: column,
             resolved_column,
             source_line,
             symbol,

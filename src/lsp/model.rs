@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{GotoTarget, SymbolKindFilter};
 use crate::lsp::parse::LspPosition;
 
 /// Nesting depth shown when an outline request does not set one.
@@ -80,39 +79,6 @@ impl fmt::Display for OutlineDepth {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct LocationOutput {
-    pub(crate) workspace_root: PathBuf,
-    pub(crate) position: ResolvedPosition,
-    pub(crate) target: Option<GotoTarget>,
-    pub(crate) locations: Vec<LocationRecord>,
-}
-
-#[derive(Debug)]
-pub(crate) struct WorkspaceSymbolOutput {
-    pub(crate) workspace_root: PathBuf,
-    pub(crate) query: String,
-    pub(crate) kind: Option<SymbolKindFilter>,
-    /// Number of matching symbols before the limit was applied.
-    pub(crate) total: usize,
-    pub(crate) symbols: Vec<WorkspaceSymbolRecord>,
-}
-
-#[derive(Debug)]
-pub(crate) struct OutlineOutput {
-    pub(crate) workspace_root: PathBuf,
-    pub(crate) file: PathBuf,
-    pub(crate) depth: OutlineDepth,
-    pub(crate) symbols: Vec<DocumentSymbolNode>,
-}
-
-#[derive(Debug)]
-pub(crate) struct SymbolAtOutput {
-    pub(crate) workspace_root: PathBuf,
-    pub(crate) position: ResolvedPosition,
-    pub(crate) hover: String,
-}
-
 #[derive(Debug, Serialize)]
 pub(crate) struct RenameOutput {
     pub(crate) workspace_root: PathBuf,
@@ -126,7 +92,7 @@ pub(crate) struct RenameOutput {
     pub(crate) diff: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct ResolvedPosition {
     pub(crate) file: PathBuf,
     pub(crate) line: usize,
@@ -136,7 +102,7 @@ pub(crate) struct ResolvedPosition {
     pub(crate) symbol: Option<SymbolAtRecord>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Serialize)]
 pub(crate) struct SymbolAtRecord {
     pub(crate) name: String,
     pub(crate) start_column: usize,
@@ -192,7 +158,7 @@ pub(crate) struct DocumentSymbolNode {
     pub(crate) children: Vec<DocumentSymbolNode>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct WorkspaceSymbolRecord {
     pub(crate) name: String,
     pub(crate) kind: SymbolKind,

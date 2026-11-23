@@ -4,7 +4,6 @@ mod protocol;
 mod watch;
 
 use std::env;
-use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
@@ -155,9 +154,8 @@ pub(crate) fn run_via_daemon_reply(
 
 pub(crate) fn daemon_status(workspace_root: &Path) -> Result<DaemonStatus> {
     let socket_path = socket_path(workspace_root)?;
-    let daemon = protocol::send_request(&socket_path, &DaemonRequest::Ping)?
-        .as_ref()
-        .and_then(daemon_identity);
+    let daemon =
+        protocol::send_request(&socket_path, &DaemonRequest::Ping)?.and_then(daemon_identity);
 
     Ok(DaemonStatus {
         socket_path,
@@ -242,7 +240,9 @@ fn spawn_daemon_process(
     };
     let mut command = Command::new(current_exe);
     command
-        .args(daemon_serve_args(workspace_root, idle_seconds))
+        .args(["daemon", "--workspace"])
+        .arg(workspace_root)
+        .args(["serve", "--idle-seconds", &idle_seconds.to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr);
@@ -258,17 +258,6 @@ fn spawn_daemon_process(
         });
     }
     command.spawn().context("failed to spawn daemon process")
-}
-
-fn daemon_serve_args(workspace_root: &Path, idle_seconds: u64) -> Vec<OsString> {
-    vec![
-        OsString::from("daemon"),
-        OsString::from("--workspace"),
-        workspace_root.as_os_str().to_os_string(),
-        OsString::from("serve"),
-        OsString::from("--idle-seconds"),
-        OsString::from(idle_seconds.to_string()),
-    ]
 }
 
 fn stop_daemon(workspace_root: &Path) -> Result<bool> {
@@ -327,7 +316,7 @@ fn serve_daemon(workspace_root: &Path, idle_seconds: u64) -> Result<()> {
 
     // Refuse to take over a live socket; the startup lock handles stale cleanup before spawn.
     if let Some(response) = protocol::send_request(&socket_path, &DaemonRequest::Ping)? {
-        let pid = daemon_identity(&response)
+        let pid = daemon_identity(response)
             .map_or_else(|| "unknown".to_string(), |daemon| daemon.pid.to_string());
         bail!(
             "daemon already running for workspace {} (pid {pid})",
@@ -510,33 +499,6 @@ fn acquire_startup_lock(workspace_root: &Path) -> Result<fs::File> {
     Ok(file)
 }
 
-/// Return the daemon identity reported in a successful ping or shutdown reply.
-fn daemon_identity(response: &DaemonResponse) -> Option<DaemonIdentity> {
-    let payload = response.as_ref().ok()?.payload.clone()?;
-    serde_json::from_value(payload).ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::ffi::OsString;
-    use std::path::Path;
-
-    use super::daemon_serve_args;
-
-    #[test]
-    fn daemon_serve_args_place_workspace_under_daemon_subcommand() {
-        let args = daemon_serve_args(Path::new("/tmp/example"), 900);
-
-        assert_eq!(
-            args,
-            vec![
-                OsString::from("daemon"),
-                OsString::from("--workspace"),
-                OsString::from("/tmp/example"),
-                OsString::from("serve"),
-                OsString::from("--idle-seconds"),
-                OsString::from("900"),
-            ]
-        );
-    }
+fn daemon_identity(response: DaemonResponse) -> Option<DaemonIdentity> {
+    serde_json::from_value(response.ok()?.payload?).ok()
 }

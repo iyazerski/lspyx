@@ -1,6 +1,6 @@
 //! Watch the workspace for the file changes the daemon must forward to ty.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -101,15 +101,14 @@ impl WorkspaceWatcher {
         fs::write(&cookie, b"").with_context(|| format!("failed to write {}", cookie.display()))?;
         let collected = self.collect_until(&cookie);
         let _ = fs::remove_file(&cookie);
-        let (changed, created) = collected?;
 
         // Events coalesce and arrive late, so the path's current state decides the change type.
-        Ok(changed
+        Ok(collected?
             .into_iter()
-            .map(|path| {
+            .map(|(path, created)| {
                 let change = if !path.exists() {
                     FileChangeType::Deleted
-                } else if created.contains(&path) {
+                } else if created {
                     FileChangeType::Created
                 } else {
                     FileChangeType::Changed
@@ -119,27 +118,19 @@ impl WorkspaceWatcher {
             .collect())
     }
 
-    /// Read messages until `cookie` shows up, returning the changed and created paths.
-    fn collect_until(&self, cookie: &Path) -> Result<(HashSet<PathBuf>, HashSet<PathBuf>)> {
+    fn collect_until(&self, cookie: &Path) -> Result<BTreeMap<PathBuf, bool>> {
         let deadline = Instant::now() + COOKIE_TIMEOUT;
-        let mut changed = HashSet::new();
-        let mut created = HashSet::new();
+        let mut changed = BTreeMap::new();
         loop {
             match self
                 .messages
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             {
-                Ok(WatchMessage::Change {
-                    path,
-                    created: is_creation,
-                }) => {
-                    if is_creation {
-                        created.insert(path.clone());
-                    }
-                    changed.insert(path);
+                Ok(WatchMessage::Change { path, created }) => {
+                    *changed.entry(path).or_insert(false) |= created;
                 }
                 Ok(WatchMessage::Cookie(path)) if path == cookie => {
-                    return Ok((changed, created));
+                    return Ok(changed);
                 }
                 Ok(WatchMessage::Cookie(_)) => {}
                 Ok(WatchMessage::Failed(error)) => bail!("file watcher failed: {error}"),

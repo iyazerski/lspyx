@@ -1,8 +1,11 @@
+use std::fs;
+
 use rmcp::{handler::server::wrapper::Parameters, model::ErrorCode};
+use tempfile::TempDir;
 
 use super::LspyxMcp;
 use super::diagnostics::{DiagnosticsRequest, prepare as prepare_diagnostics};
-use super::explore::{ExploreRequest, ExploreTarget, prepare as prepare_explore, select_target};
+use super::explore::{ExploreRequest, ExploreTarget, prepare as prepare_explore};
 use super::rename::{RenameRequest, prepare as prepare_rename};
 use crate::cli::SymbolKindFilter;
 use crate::file_position::FilePosition;
@@ -32,11 +35,11 @@ fn exposes_agent_tools() {
 #[test]
 fn routes_query_only_to_workspace_symbols() {
     let mut request = request();
-    request.workspace = Some("/tmp/example".into());
+    request.workspace = Some("/tmp".into());
     request.query = Some("  User ".to_string());
 
     assert_eq!(
-        select_target(&request).unwrap(),
+        prepare_explore(request).unwrap().target,
         ExploreTarget::WorkspaceSymbols {
             query: "User".to_string(),
             kind: None,
@@ -46,51 +49,52 @@ fn routes_query_only_to_workspace_symbols() {
 
 #[test]
 fn routes_file_only_to_outline_with_depth() {
-    let mut request = request();
-    request.query = None;
-    request.file = Some("src/app.py".into());
+    let dir = TempDir::new().unwrap();
+    let app = dir.path().join("app.py");
+    fs::write(&app, "").unwrap();
+    let canonical = app.canonicalize().unwrap();
 
-    assert_eq!(
-        select_target(&request).unwrap(),
-        ExploreTarget::Outline {
-            file: "src/app.py".into(),
-            depth: OutlineDepth::Limited(2),
-        }
-    );
+    for (depth, full, expected) in [
+        (None, false, OutlineDepth::Limited(2)),
+        (Some(3), false, OutlineDepth::Limited(3)),
+        (None, true, OutlineDepth::Full),
+    ] {
+        let mut request = request();
+        request.query = None;
+        request.workspace = Some(dir.path().to_path_buf());
+        request.file = Some("app.py".into());
+        request.depth = depth;
+        request.full = full;
 
-    request.depth = Some(3);
-    assert!(matches!(
-        select_target(&request).unwrap(),
-        ExploreTarget::Outline {
-            depth: OutlineDepth::Limited(3),
-            ..
-        }
-    ));
-
-    request.depth = None;
-    request.full = true;
-    assert!(matches!(
-        select_target(&request).unwrap(),
-        ExploreTarget::Outline {
-            depth: OutlineDepth::Full,
-            ..
-        }
-    ));
+        assert_eq!(
+            prepare_explore(request).unwrap().target,
+            ExploreTarget::Outline {
+                file: canonical.clone(),
+                depth: expected,
+            }
+        );
+    }
 }
 
 #[test]
 fn routes_file_position_to_position_bundle() {
+    let dir = TempDir::new().unwrap();
+    let app = dir.path().join("app.py");
+    fs::write(&app, "").unwrap();
+    let canonical = app.canonicalize().unwrap();
+
     let mut request = request();
     request.query = None;
-    request.file = Some("src/app.py".into());
+    request.workspace = Some(dir.path().to_path_buf());
+    request.file = Some("app.py".into());
     request.line = Some(42);
     request.column = Some(17);
     request.limit = Some(2);
 
     assert_eq!(
-        select_target(&request).unwrap(),
+        prepare_explore(request).unwrap().target,
         ExploreTarget::Position(FilePosition {
-            file: "src/app.py".into(),
+            file: canonical,
             line: 42,
             column: 17,
         })
@@ -157,7 +161,7 @@ fn rejects_invalid_explore_requests() {
     for (expected, configure) in cases {
         let mut request = request();
         configure(&mut request);
-        assert_eq!(select_target(&request).unwrap_err().to_string(), expected);
+        assert_eq!(prepare_explore(request).unwrap_err().to_string(), expected);
     }
 }
 

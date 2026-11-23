@@ -60,15 +60,12 @@ pub(crate) fn run_update() -> Result<String> {
 fn install(tag: &str, staging: &Path, exe: &Path) -> Result<()> {
     let asset = asset()?;
     let url = format!("https://github.com/{REPO}/releases/download/{tag}/{asset}");
-    for (url, file) in [
-        (url.clone(), asset.clone()),
-        (format!("{url}.sha256"), format!("{asset}.sha256")),
-    ] {
+    for suffix in ["", ".sha256"] {
         run(
             Command::new("curl")
                 .args(["-fsSL", "-o"])
-                .arg(staging.join(file))
-                .arg(url),
+                .arg(staging.join(format!("{asset}{suffix}")))
+                .arg(format!("{url}{suffix}")),
             "downloading the release",
         )?;
     }
@@ -118,13 +115,12 @@ fn run(command: &mut Command, what: &str) -> Result<String> {
 
 /// Return whether version `a` (like `0.5.10`) is newer than `b`, comparing numbers in order.
 pub(crate) fn is_newer(a: &str, b: &str) -> bool {
-    let parts = |version: &str| -> Vec<u64> {
+    fn parts(version: &str) -> impl Iterator<Item = u64> + '_ {
         version
             .split('.')
-            .map(|part| part.parse().unwrap_or(0))
-            .collect()
-    };
-    parts(a) > parts(b)
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+    }
+    parts(a).gt(parts(b))
 }
 
 #[cfg(test)]
