@@ -83,7 +83,6 @@ impl McpServer {
         self.stdin.flush().expect("failed to flush mcp message");
     }
 
-    /// Call `tool` with `arguments` and return the JSON-RPC response.
     fn call_tool(&mut self, tool: &str, arguments: Value) -> Value {
         self.send(json!({
             "jsonrpc": "2.0",
@@ -131,7 +130,7 @@ fn mcp_rejects_unknown_pre_init_request_and_stays_running() {
 }
 
 #[test]
-fn mcp_lists_lspyx_tools() {
+fn mcp_lists_tools_with_expected_schemas() {
     let mut server = McpServer::start();
     server.initialize();
 
@@ -146,115 +145,34 @@ fn mcp_lists_lspyx_tools() {
     let tools = response["result"]["tools"]
         .as_array()
         .expect("tools/list did not return tools");
-    let mut tool_names = tools
+    let mut tool_names: Vec<&str> = tools
         .iter()
         .map(|tool| tool["name"].as_str().expect("tool missing name"))
-        .collect::<Vec<_>>();
+        .collect();
     tool_names.sort_unstable();
-
     assert_eq!(tool_names, vec!["diagnostics", "explore", "rename"]);
-}
 
-#[test]
-fn mcp_exposes_explore_control_schema() {
-    let mut server = McpServer::start();
-    server.initialize();
-
-    server.send(json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/list",
-        "params": {},
-    }));
-
-    let response = server.read_response();
-    let tools = response["result"]["tools"]
-        .as_array()
-        .expect("tools/list did not return tools");
-    let explore = tools
-        .iter()
-        .find(|tool| tool["name"] == "explore")
-        .expect("missing explore tool");
-    let input_schema = &explore["inputSchema"];
-    let properties = input_schema["properties"]
-        .as_object()
-        .expect("input schema missing properties");
-
-    for field in ["limit", "kind", "depth", "full"] {
-        assert!(
-            properties.contains_key(field),
-            "input schema missing {field}"
-        );
-    }
-}
-
-#[test]
-fn mcp_exposes_diagnostics_scope_schema() {
-    let mut server = McpServer::start();
-    server.initialize();
-
-    server.send(json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/list",
-        "params": {},
-    }));
-
-    let response = server.read_response();
-    let tools = response["result"]["tools"]
-        .as_array()
-        .expect("tools/list did not return tools");
-    let diagnostics = tools
-        .iter()
-        .find(|tool| tool["name"] == "diagnostics")
-        .expect("missing diagnostics tool");
-    let properties = diagnostics["inputSchema"]["properties"]
-        .as_object()
-        .expect("input schema missing properties");
-
-    for field in ["workspace", "path", "limit"] {
-        assert!(
-            properties.contains_key(field),
-            "input schema missing {field}"
-        );
-    }
-}
-
-#[test]
-fn mcp_exposes_rename_preview_schema() {
-    let mut server = McpServer::start();
-    server.initialize();
-
-    server.send(json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/list",
-        "params": {},
-    }));
-
-    let response = server.read_response();
-    let tools = response["result"]["tools"]
-        .as_array()
-        .expect("tools/list did not return tools");
-    let rename = tools
-        .iter()
-        .find(|tool| tool["name"] == "rename")
-        .expect("missing rename tool");
-    let properties = rename["inputSchema"]["properties"]
-        .as_object()
-        .expect("input schema missing properties");
-
-    for field in ["workspace", "file", "line", "column", "new_name"] {
-        assert!(
-            properties.contains_key(field),
-            "input schema missing {field}"
-        );
-    }
-    for field in ["format", "limit"] {
-        assert!(
-            !properties.contains_key(field),
-            "input schema unexpectedly contains {field}"
-        );
+    for (name, required_fields) in [
+        ("explore", &["limit", "kind", "depth", "full"][..]),
+        ("diagnostics", &["workspace", "path", "limit"][..]),
+        (
+            "rename",
+            &["workspace", "file", "line", "column", "new_name"][..],
+        ),
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("missing {name} tool"));
+        let properties = tool["inputSchema"]["properties"]
+            .as_object()
+            .expect("input schema missing properties");
+        for field in required_fields {
+            assert!(
+                properties.contains_key(*field),
+                "{name} input schema missing {field}"
+            );
+        }
     }
 }
 

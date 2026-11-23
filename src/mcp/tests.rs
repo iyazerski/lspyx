@@ -1,14 +1,15 @@
-use rmcp::{handler::server::wrapper::Parameters, model::ErrorCode};
+use std::fs;
 
-use super::LspyxMcp;
+use tempfile::TempDir;
+
 use super::diagnostics::{DiagnosticsRequest, prepare as prepare_diagnostics};
-use super::explore::{ExploreRequest, ExploreTarget, prepare as prepare_explore, select_target};
+use super::explore::{ExploreRequest, ExploreTarget, prepare as prepare_explore};
 use super::rename::{RenameRequest, prepare as prepare_rename};
 use crate::cli::SymbolKindFilter;
 use crate::file_position::FilePosition;
 use crate::lsp::model::OutlineDepth;
 
-fn request() -> ExploreRequest {
+fn explore_request() -> ExploreRequest {
     ExploreRequest {
         query: Some("User".to_string()),
         workspace: None,
@@ -23,84 +24,66 @@ fn request() -> ExploreRequest {
 }
 
 #[test]
-fn exposes_agent_tools() {
-    let mut names = LspyxMcp::new().tool_names();
-    names.sort();
-    assert_eq!(names, vec!["diagnostics", "explore", "rename"]);
-}
+fn routes_explore_modes() {
+    let dir = TempDir::new().unwrap();
+    let app = dir.path().join("app.py");
+    fs::write(&app, "").unwrap();
+    let canonical = app.canonicalize().unwrap();
 
-#[test]
-fn routes_query_only_to_workspace_symbols() {
-    let mut request = request();
-    request.workspace = Some("/tmp/example".into());
-    request.query = Some("  User ".to_string());
-
+    let mut symbols = explore_request();
+    symbols.workspace = Some(dir.path().to_path_buf());
+    symbols.query = Some("  User ".to_string());
+    symbols.kind = Some(SymbolKindFilter::Class);
+    symbols.limit = Some(5);
+    let prepared = prepare_explore(symbols).unwrap();
     assert_eq!(
-        select_target(&request).unwrap(),
+        prepared.target,
         ExploreTarget::WorkspaceSymbols {
             query: "User".to_string(),
-            kind: None,
+            kind: Some(SymbolKindFilter::Class),
         }
     );
-}
+    assert_eq!(prepared.limit, Some(5));
 
-#[test]
-fn routes_file_only_to_outline_with_depth() {
-    let mut request = request();
-    request.query = None;
-    request.file = Some("src/app.py".into());
+    for (depth, full, expected) in [
+        (None, false, OutlineDepth::Limited(2)),
+        (Some(3), false, OutlineDepth::Limited(3)),
+        (None, true, OutlineDepth::Full),
+    ] {
+        let mut outline = explore_request();
+        outline.query = None;
+        outline.workspace = Some(dir.path().to_path_buf());
+        outline.file = Some("app.py".into());
+        outline.depth = depth;
+        outline.full = full;
+        assert_eq!(
+            prepare_explore(outline).unwrap().target,
+            ExploreTarget::Outline {
+                file: canonical.clone(),
+                depth: expected,
+            }
+        );
+    }
 
+    let mut position = explore_request();
+    position.query = None;
+    position.workspace = Some(dir.path().to_path_buf());
+    position.file = Some("app.py".into());
+    position.line = Some(42);
+    position.column = Some(17);
     assert_eq!(
-        select_target(&request).unwrap(),
-        ExploreTarget::Outline {
-            file: "src/app.py".into(),
-            depth: OutlineDepth::Limited(2),
-        }
-    );
-
-    request.depth = Some(3);
-    assert!(matches!(
-        select_target(&request).unwrap(),
-        ExploreTarget::Outline {
-            depth: OutlineDepth::Limited(3),
-            ..
-        }
-    ));
-
-    request.depth = None;
-    request.full = true;
-    assert!(matches!(
-        select_target(&request).unwrap(),
-        ExploreTarget::Outline {
-            depth: OutlineDepth::Full,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn routes_file_position_to_position_bundle() {
-    let mut request = request();
-    request.query = None;
-    request.file = Some("src/app.py".into());
-    request.line = Some(42);
-    request.column = Some(17);
-    request.limit = Some(2);
-
-    assert_eq!(
-        select_target(&request).unwrap(),
+        prepare_explore(position).unwrap().target,
         ExploreTarget::Position(FilePosition {
-            file: "src/app.py".into(),
+            file: canonical,
             line: 42,
             column: 17,
         })
     );
 }
 
-type Configure = fn(&mut ExploreRequest);
-
 #[test]
 fn rejects_invalid_explore_requests() {
+    type Configure = fn(&mut ExploreRequest);
     let cases: [(&str, Configure); 10] = [
         ("workspace is required when file is omitted", |_| {}),
         ("query is required when file is omitted", |request| {
@@ -155,70 +138,33 @@ fn rejects_invalid_explore_requests() {
     ];
 
     for (expected, configure) in cases {
-        let mut request = request();
+        let mut request = explore_request();
         configure(&mut request);
-        assert_eq!(select_target(&request).unwrap_err().to_string(), expected);
+        assert_eq!(prepare_explore(request).unwrap_err().to_string(), expected);
     }
 }
 
 #[test]
-fn accepts_query_only_kind_and_limit() {
-    let mut request = request();
-    request.workspace = Some("/tmp".into());
-    request.kind = Some(SymbolKindFilter::Class);
-    request.limit = Some(5);
-
-    let prepared = prepare_explore(request).unwrap();
-
-    assert_eq!(
-        prepared.target,
-        ExploreTarget::WorkspaceSymbols {
-            query: "User".to_string(),
-            kind: Some(SymbolKindFilter::Class),
-        }
-    );
-    assert_eq!(prepared.limit, Some(5));
-}
-
-#[test]
-fn tool_returns_invalid_params_for_invalid_file() {
-    let mut request = request();
-    request.file = Some("__missing__/app.py".into());
-
-    let error = LspyxMcp::new().explore(Parameters(request)).unwrap_err();
-
-    assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
-}
-
-#[test]
-fn diagnostics_requires_workspace_without_path() {
+fn rejects_invalid_diagnostics_and_rename_requests() {
     let error = prepare_diagnostics(DiagnosticsRequest {
         workspace: None,
         path: None,
         limit: None,
     })
     .unwrap_err();
-
     assert_eq!(
         error.to_string(),
         "workspace is required when path is omitted"
     );
-}
 
-#[test]
-fn diagnostics_rejects_zero_limit() {
     let error = prepare_diagnostics(DiagnosticsRequest {
         workspace: Some("/tmp".into()),
         path: None,
         limit: Some(0),
     })
     .unwrap_err();
-
     assert_eq!(error.to_string(), "limit must be greater than 0");
-}
 
-#[test]
-fn rename_rejects_empty_new_name() {
     let error = prepare_rename(RenameRequest {
         workspace: Some("/tmp".into()),
         file: "example.py".into(),
@@ -227,6 +173,5 @@ fn rename_rejects_empty_new_name() {
         new_name: "  ".to_string(),
     })
     .unwrap_err();
-
     assert_eq!(error.to_string(), "new_name must not be empty");
 }

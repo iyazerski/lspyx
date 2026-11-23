@@ -12,7 +12,6 @@ use crate::lsp::model::{
     SymbolAtRecord, SymbolKind, WorkspaceSymbolRecord,
 };
 
-/// Zero-based LSP wire position, converted into a 1-based [`PositionRecord`].
 #[derive(Deserialize)]
 pub(crate) struct LspPosition {
     line: usize,
@@ -98,7 +97,20 @@ struct LspTextEdit {
     new_text: String,
 }
 
-/// Deserialize an LSP result, treating `null` as the default (empty) value.
+#[derive(Deserialize)]
+struct LspHover {
+    contents: HoverContents,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum HoverContents {
+    Text(String),
+    List(Vec<HoverContents>),
+    Marked { language: String, value: String },
+    Markup { value: String },
+}
+
 fn parse_result<T: DeserializeOwned + Default>(value: Value, method: &str) -> Result<T> {
     Ok(serde_json::from_value::<Option<T>>(value)
         .with_context(|| format!("invalid {method} response"))?
@@ -134,38 +146,23 @@ pub(crate) fn parse_location_response(value: Value) -> Result<Vec<LocationRecord
 }
 
 pub(crate) fn parse_hover_contents(value: Value) -> Result<String> {
-    if value.is_null() {
-        return Ok(String::new());
-    }
-
-    let contents = value
-        .get("contents")
-        .context("hover response missing contents")?;
-    Ok(stringify_hover_contents(contents))
+    let hover = serde_json::from_value::<Option<LspHover>>(value)
+        .context("invalid textDocument/hover response")?;
+    Ok(hover.map_or_else(String::new, |hover| {
+        stringify_hover_contents(hover.contents)
+    }))
 }
 
-fn stringify_hover_contents(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Array(items) => items
-            .iter()
+fn stringify_hover_contents(contents: HoverContents) -> String {
+    match contents {
+        HoverContents::Text(text) | HoverContents::Markup { value: text } => text,
+        HoverContents::Marked { language, value } => format!("```{language}\n{value}\n```"),
+        HoverContents::List(items) => items
+            .into_iter()
             .map(stringify_hover_contents)
             .filter(|value| !value.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n"),
-        Value::Object(map) => match (
-            map.get("language").and_then(Value::as_str),
-            map.get("value"),
-        ) {
-            // `MarkedString` with a language is a fenced code block.
-            (Some(language), Some(body)) => {
-                format!("```{language}\n{}\n```", stringify_hover_contents(body))
-            }
-            // `MarkupContent` already carries rendered markdown or plain text.
-            (None, Some(body)) => stringify_hover_contents(body),
-            _ => serde_json::to_string_pretty(value).unwrap_or_default(),
-        },
-        _ => value.to_string(),
     }
 }
 
@@ -279,7 +276,6 @@ pub(crate) fn prune_outline_depth(
         .collect()
 }
 
-/// Extract the identifier at (or just before) a 1-based column of `line`.
 pub(crate) fn extract_symbol_at(
     line: &str,
     column_number: usize,
@@ -357,8 +353,8 @@ mod tests {
     };
 
     #[test]
-    fn parse_location_link_uses_target_selection_range() {
-        let value = json!({
+    fn parses_location_variants() {
+        let link = parse_location_response(json!({
             "targetUri": "file:///tmp/example.py",
             "targetRange": {
                 "start": {"line": 0, "character": 0},
@@ -368,27 +364,24 @@ mod tests {
                 "start": {"line": 1, "character": 2},
                 "end": {"line": 1, "character": 5}
             }
-        });
+        }))
+        .unwrap();
+        assert_eq!(link.len(), 1);
+        assert_eq!(
+            (link[0].range.start.line, link[0].range.start.column),
+            (2, 3)
+        );
 
-        let parsed = parse_location_response(value).unwrap();
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].range.start.line, 2);
-        assert_eq!(parsed[0].range.start.column, 3);
-    }
-
-    #[test]
-    fn parse_location_array_and_null() {
-        let value = json!([{
+        let array = parse_location_response(json!([{
             "uri": "file:///tmp/example.py",
             "range": {
                 "start": {"line": 4, "character": 0},
                 "end": {"line": 4, "character": 3}
             }
-        }]);
-
-        let parsed = parse_location_response(value).unwrap();
-        assert_eq!(parsed[0].file, Path::new("/tmp/example.py"));
-        assert_eq!(parsed[0].range.end.column, 4);
+        }]))
+        .unwrap();
+        assert_eq!(array[0].file, Path::new("/tmp/example.py"));
+        assert_eq!(array[0].range.end.column, 4);
         assert!(parse_location_response(json!(null)).unwrap().is_empty());
     }
 
@@ -431,65 +424,50 @@ mod tests {
     }
 
     #[test]
-    fn parses_workspace_edit_changes() {
-        let value = json!({
+    fn parses_workspace_edit_variants() {
+        let from_changes = parse_workspace_edit(json!({
             "changes": {
-                "file:///tmp/example.py": [
-                    {
-                        "range": {
-                            "start": {"line": 1, "character": 2},
-                            "end": {"line": 1, "character": 6}
-                        },
-                        "newText": "Renamed"
-                    }
-                ]
-            }
-        });
-
-        let parsed = parse_workspace_edit(value).unwrap();
-
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].file, Path::new("/tmp/example.py"));
-        assert_eq!(parsed[0].range.start.line, 2);
-        assert_eq!(parsed[0].range.start.column, 3);
-        assert_eq!(parsed[0].new_text, "Renamed");
-    }
-
-    #[test]
-    fn parses_workspace_edit_document_changes() {
-        let value = json!({
-            "documentChanges": [
-                {
-                    "textDocument": {
-                        "uri": "file:///tmp/example.py",
-                        "version": 1
+                "file:///tmp/example.py": [{
+                    "range": {
+                        "start": {"line": 1, "character": 2},
+                        "end": {"line": 1, "character": 6}
                     },
-                    "edits": [
-                        {
-                            "range": {
-                                "start": {"line": 3, "character": 4},
-                                "end": {"line": 3, "character": 8}
-                            },
-                            "newText": "Renamed"
-                        }
-                    ]
-                }
-            ]
-        });
+                    "newText": "Renamed"
+                }]
+            }
+        }))
+        .unwrap();
+        assert_eq!(from_changes.len(), 1);
+        assert_eq!(from_changes[0].file, Path::new("/tmp/example.py"));
+        assert_eq!(
+            (
+                from_changes[0].range.start.line,
+                from_changes[0].range.start.column
+            ),
+            (2, 3)
+        );
+        assert_eq!(from_changes[0].new_text, "Renamed");
 
-        let parsed = parse_workspace_edit(value).unwrap();
+        let from_doc_changes = parse_workspace_edit(json!({
+            "documentChanges": [{
+                "textDocument": {"uri": "file:///tmp/example.py", "version": 1},
+                "edits": [{
+                    "range": {
+                        "start": {"line": 3, "character": 4},
+                        "end": {"line": 3, "character": 8}
+                    },
+                    "newText": "Renamed"
+                }]
+            }]
+        }))
+        .unwrap();
+        assert_eq!(from_doc_changes.len(), 1);
+        assert_eq!(from_doc_changes[0].range.start.line, 4);
 
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].range.start.line, 4);
-        assert_eq!(parsed[0].new_text, "Renamed");
-    }
-
-    #[test]
-    fn rejects_workspace_edit_resource_operations() {
-        let value = json!({"documentChanges": [{"kind": "create", "uri": "file:///tmp/new.py"}]});
-
+        let resource_op =
+            json!({"documentChanges": [{"kind": "create", "uri": "file:///tmp/new.py"}]});
         assert!(
-            parse_workspace_edit(value)
+            parse_workspace_edit(resource_op)
                 .unwrap_err()
                 .to_string()
                 .contains("unsupported resource operation")

@@ -31,7 +31,6 @@ pub(super) struct PreparedRename {
     new_name: String,
 }
 
-/// Validate the request and resolve its file and workspace root.
 pub(super) fn prepare(request: RenameRequest) -> Result<PreparedRename> {
     let mut position = FilePosition::new(request.file, request.line, request.column)?;
     let new_name = request.new_name.trim();
@@ -51,7 +50,6 @@ pub(super) fn prepare(request: RenameRequest) -> Result<PreparedRename> {
     })
 }
 
-/// Run the prepared rename preview through the workspace daemon.
 pub(super) fn execute(prepared: PreparedRename) -> Result<DaemonReply> {
     daemon::run_via_daemon_reply(
         &prepared.workspace_root,

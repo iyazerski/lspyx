@@ -49,15 +49,6 @@ impl LspyxMcp {
             tool_router: Self::tool_router(),
         }
     }
-
-    #[cfg(test)]
-    fn tool_names(&self) -> Vec<String> {
-        self.tool_router
-            .list_all()
-            .into_iter()
-            .map(|tool| tool.name.to_string())
-            .collect()
-    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -114,17 +105,14 @@ impl LspyxMcp {
     }
 }
 
-/// Map a request validation failure to an MCP invalid-params protocol error.
 fn invalid_params(error: anyhow::Error) -> ErrorData {
     ErrorData::invalid_params(format!("{error:#}"), None)
 }
 
-/// Report an execution failure as a tool-level error result visible to the agent.
 fn tool_error(error: &anyhow::Error) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(format!("{error:#}"))])
 }
 
-/// Resolve a tool file argument, joining relative paths onto the workspace.
 fn resolve_file(file: &Path, workspace: Option<&Path>) -> Result<PathBuf> {
     if file.is_absolute() {
         return canonicalize_path(file);
@@ -135,11 +123,6 @@ fn resolve_file(file: &Path, workspace: Option<&Path>) -> Result<PathBuf> {
     canonicalize_path(&workspace.join(file))
 }
 
-/// Run an `lspyx mcp` subcommand.
-///
-/// # Errors
-///
-/// Returns an error when the runtime cannot start or the MCP session fails.
 pub(crate) fn run_mcp_command(args: McpArgs) -> Result<()> {
     match args.command {
         McpSubcommand::Serve => {

@@ -6,7 +6,6 @@ use similar::TextDiff;
 
 use crate::lsp::model::{PositionRecord, RenameEditRecord, display_path};
 
-/// Build a complete unified diff from validated semantic rename edits sorted by file.
 pub(crate) fn build_rename_diff(
     workspace_root: &Path,
     old_name: &str,
@@ -116,35 +115,20 @@ mod tests {
 
     use crate::lsp::model::{PositionRecord, RangeRecord, RenameEditRecord};
 
-    use super::{apply_rename_edits, position_to_byte_offset};
+    use super::apply_rename_edits;
 
     #[test]
-    fn applies_multiple_edits_from_the_end() {
-        let original = "value = Chat(Chat.id)\n";
+    fn applies_multiple_utf16_edits_from_the_end() {
+        let original = "x = '😀'; Chat(Chat.id)\n";
         let edits = [
-            edit(1, 9, 13, "Conversation"),
-            edit(1, 14, 18, "Conversation"),
+            edit(1, 11, 15, "Conversation"),
+            edit(1, 16, 20, "Conversation"),
         ];
 
         let updated =
             apply_rename_edits(original, "Chat", Path::new("example.py"), &edits).unwrap();
 
-        assert_eq!(updated, "value = Conversation(Conversation.id)\n");
-    }
-
-    #[test]
-    fn converts_utf16_columns_to_byte_offsets() {
-        let text = "x = '😀'; Chat\n";
-        let offset = position_to_byte_offset(
-            text,
-            &PositionRecord {
-                line: 1,
-                column: 11,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(&text[offset..offset + 4], "Chat");
+        assert_eq!(updated, "x = '😀'; Conversation(Conversation.id)\n");
     }
 
     #[test]

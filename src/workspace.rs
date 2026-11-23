@@ -48,12 +48,10 @@ pub(crate) fn resolve_workspace_root_for_target(target: &Path, cwd: &Path) -> Re
     canonicalize_path(&detect_workspace_root(None, seed))
 }
 
-/// Return the lspyx cache directory, or `None` when HOME is unset.
 pub(crate) fn cache_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache").join("lspyx"))
 }
 
-/// Return a stable per-workspace key used to name cache entries.
 pub(crate) fn workspace_cache_key(workspace_root: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     workspace_root.hash(&mut hasher);
@@ -84,20 +82,17 @@ fn locate_workspace_binary(
     override_variable: &str,
     missing_message: &'static str,
 ) -> Result<PathBuf> {
-    // Allow an explicit override for debugging or alternate installs.
     if let Some(path) = env::var_os(override_variable).map(PathBuf::from)
         && path.is_file()
     {
         return Ok(path);
     }
 
-    // Prefer the workspace virtualenv to match the active project environment.
     let local_binary = workspace_root.join(".venv").join("bin").join(name);
     if local_binary.is_file() {
         return Ok(local_binary);
     }
 
-    // Fall back to a PATH lookup for globally installed toolchains.
     which::which(name).context(missing_message)
 }
 
@@ -182,18 +177,15 @@ fn contains_python_project_hint(path: &Path) -> Result<bool> {
     Ok(false)
 }
 
-/// List a directory with a path-aware error message.
 fn read_dir(path: &Path) -> Result<fs::ReadDir> {
     fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))
 }
 
-/// Return whether a directory entry is a real (non-symlink) directory worth scanning.
 fn is_walkable_dir(entry: &DirEntry) -> Result<bool> {
-    // `file_type` does not follow symlinks, which avoids an extra stat and symlink cycles.
+    // `file_type` does not follow symlinks, avoiding extra stats and symlink cycles.
     Ok(entry.file_type()?.is_dir() && !is_ignored_dir_name(&entry.file_name()))
 }
 
-/// Return whether a directory with this name holds tool state or dependencies, not project code.
 pub(crate) fn is_ignored_dir_name(name: &OsStr) -> bool {
     matches!(
         name.to_str(),
@@ -233,29 +225,25 @@ fn relative_root_string(workspace_root: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::env;
     use std::fs;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use tempfile::TempDir;
 
     use super::{detect_workspace_root, discover_ty_roots};
 
     #[test]
     fn workspace_root_prefers_pyproject() {
-        let base = unique_temp_dir("lspyx-test");
-        let nested = base.join("a").join("b").join("c");
+        let base = TempDir::new().unwrap();
+        let nested = base.path().join("a").join("b").join("c");
         fs::create_dir_all(&nested).unwrap();
-        fs::write(base.join("pyproject.toml"), "[project]\nname='x'\n").unwrap();
+        fs::write(base.path().join("pyproject.toml"), "[project]\nname='x'\n").unwrap();
 
-        let detected = detect_workspace_root(None, &nested);
-        assert_eq!(detected, base);
-
-        fs::remove_dir_all(&base).unwrap();
+        assert_eq!(detect_workspace_root(None, &nested), base.path());
     }
 
     #[test]
     fn ty_roots_include_src_trees_and_python_groups() {
-        let base = unique_temp_dir("lspyx-roots");
+        let base = TempDir::new().unwrap();
         for dir in [
             "src",
             "packages/api/src",
@@ -263,14 +251,13 @@ mod tests {
             "python/pkg",
             ".venv/lib/src",
         ] {
-            fs::create_dir_all(base.join(dir)).unwrap();
+            fs::create_dir_all(base.path().join(dir)).unwrap();
         }
-        fs::write(base.join("python/examples/demo.py"), "").unwrap();
-        fs::write(base.join("python/pkg/__init__.py"), "").unwrap();
+        fs::write(base.path().join("python/examples/demo.py"), "").unwrap();
+        fs::write(base.path().join("python/pkg/__init__.py"), "").unwrap();
 
-        let roots = discover_ty_roots(&base).unwrap();
         assert_eq!(
-            roots,
+            discover_ty_roots(base.path()).unwrap(),
             vec![
                 ".",
                 "./packages/api/src",
@@ -279,15 +266,5 @@ mod tests {
                 "./src",
             ]
         );
-
-        fs::remove_dir_all(&base).unwrap();
-    }
-
-    fn unique_temp_dir(prefix: &str) -> PathBuf {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        env::temp_dir().join(format!("{prefix}-{suffix}"))
     }
 }

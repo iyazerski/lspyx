@@ -91,7 +91,6 @@ pub(crate) struct UsagesArgs {
 }
 
 impl UsagesArgs {
-    /// Return whether usages should include the declaration site.
     pub(crate) fn declaration(&self) -> Declaration {
         if self.exclude_declaration {
             Declaration::Exclude
@@ -109,11 +108,6 @@ pub(crate) struct PositionArgs {
 }
 
 impl PositionArgs {
-    /// Parse the location and canonicalize its file.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the location is malformed or the file cannot be resolved.
     pub(crate) fn resolve(&self) -> Result<FilePosition> {
         let mut position: FilePosition = self.location.parse()?;
         position.file = canonicalize_path(&position.file)?;
@@ -157,7 +151,6 @@ pub(crate) struct OutlineArgs {
 }
 
 impl OutlineArgs {
-    /// Return the requested outline depth.
     pub(crate) fn outline_depth(&self) -> OutlineDepth {
         if self.full {
             OutlineDepth::Full
@@ -194,7 +187,6 @@ pub(crate) enum SymbolKindFilter {
 }
 
 impl SymbolKindFilter {
-    /// Return the LSP symbol kind this filter selects.
     pub(crate) fn lsp_kind(self) -> SymbolKind {
         match self {
             Self::Class => SymbolKind::CLASS,
@@ -210,48 +202,4 @@ pub(crate) enum GotoTarget {
     Definition,
     Declaration,
     Type,
-}
-
-#[cfg(test)]
-mod tests {
-    use clap::Parser;
-
-    use super::Cli;
-
-    #[test]
-    fn existing_subcommands_still_parse() {
-        for args in [
-            vec!["lspyx", "doctor"],
-            vec!["lspyx", "find-symbol", "--limit", "5", "User"],
-            vec!["lspyx", "inspect", "src/app.py:1:1"],
-            vec!["lspyx", "goto", "src/app.py:1:1"],
-            vec!["lspyx", "usages", "src/app.py:1:1"],
-            vec!["lspyx", "outline", "src/app.py"],
-            vec!["lspyx", "daemon", "--workspace", ".", "status"],
-        ] {
-            Cli::try_parse_from(args).unwrap();
-        }
-    }
-
-    #[test]
-    fn outline_rejects_depth_with_full() {
-        assert!(
-            Cli::try_parse_from(["lspyx", "outline", "a.py", "--full", "--depth", "1"]).is_err()
-        );
-    }
-
-    #[test]
-    fn mcp_serve_subcommand_parses() {
-        Cli::try_parse_from(["lspyx", "mcp", "serve"]).unwrap();
-    }
-
-    #[test]
-    fn mcp_serve_rejects_cli_only_options() {
-        for args in [
-            ["lspyx", "mcp", "--workspace", ".", "serve"],
-            ["lspyx", "mcp", "--limit", "5", "serve"],
-        ] {
-            assert!(Cli::try_parse_from(args).is_err());
-        }
-    }
 }

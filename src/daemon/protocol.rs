@@ -12,7 +12,6 @@ use crate::cli::{GotoTarget, SymbolKindFilter};
 use crate::file_position::FilePosition;
 use crate::lsp::model::OutlineDepth;
 
-/// A successful daemon reply: rendered text plus an optional structured payload.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DaemonReply {
     pub(crate) text: String,
@@ -20,7 +19,6 @@ pub(crate) struct DaemonReply {
 }
 
 impl DaemonReply {
-    /// Build a reply that carries only rendered text.
     pub(crate) fn text(text: String) -> Self {
         Self {
             text,
@@ -28,7 +26,6 @@ impl DaemonReply {
         }
     }
 
-    /// Build a reply with rendered text and a structured payload.
     pub(crate) fn with_payload(text: String, payload: Value) -> Self {
         Self {
             text,
@@ -37,10 +34,8 @@ impl DaemonReply {
     }
 }
 
-/// A daemon response on the wire; failures carry the request's full error chain.
 pub(super) type DaemonResponse = Result<DaemonReply, String>;
 
-/// Whether a usages search includes the declaration site.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Declaration {
@@ -71,7 +66,6 @@ pub(crate) enum DaemonRequest {
     Inspect {
         position: FilePosition,
     },
-    /// Inspect a position and, when it names a symbol, add its definition and usages.
     Explore {
         position: FilePosition,
         limit: Option<usize>,
@@ -87,14 +81,7 @@ pub(crate) enum DaemonRequest {
     },
 }
 
-/// Send `request` to the daemon at `socket_path`.
-///
-/// Returns `None` when no daemon is listening or it hung up before replying; a stale
-/// socket file is removed in that case.
-///
-/// # Errors
-///
-/// Returns an error when the connection or the frame exchange fails unexpectedly.
+/// Returns `None` when no daemon is listening or it closed before replying, removing any stale socket.
 pub(super) fn send_request(
     socket_path: &Path,
     request: &DaemonRequest,
@@ -147,7 +134,6 @@ fn read_frame(stream: &mut UnixStream) -> Result<Vec<u8>> {
     Ok(body)
 }
 
-/// Write `value` as JSON behind a big-endian u64 length prefix in a single write.
 pub(super) fn write_frame(stream: &mut UnixStream, value: &impl Serialize) -> Result<()> {
     // Serialize behind a placeholder prefix so the body is never copied.
     let mut frame = vec![0_u8; 8];
@@ -158,7 +144,6 @@ pub(super) fn write_frame(stream: &mut UnixStream, value: &impl Serialize) -> Re
     Ok(())
 }
 
-/// Return whether the daemon hung up before replying, such as when it was stopping.
 fn is_closed_without_reply(error: &anyhow::Error) -> bool {
     error.downcast_ref::<io::Error>().is_some_and(|source| {
         matches!(

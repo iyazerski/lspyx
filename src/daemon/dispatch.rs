@@ -6,10 +6,7 @@ use serde_json::json;
 use super::adapter::PersistentAdapter;
 use super::{DaemonReply, DaemonRequest, Declaration};
 use crate::cli::GotoTarget;
-use crate::lsp::model::{
-    LocationOutput, LocationRecord, OutlineDepth, OutlineOutput, RenameOutput, ResolvedPosition,
-    SymbolAtOutput, WorkspaceSymbolOutput,
-};
+use crate::lsp::model::{OutlineDepth, RenameOutput, ResolvedPosition};
 use crate::lsp::parse::{build_symbol_hierarchy, prune_outline_depth};
 use crate::lsp::rename::build_rename_diff;
 use crate::render::{
@@ -20,11 +17,9 @@ use crate::render::{
 #[derive(Debug)]
 pub(super) enum DispatchResult {
     Respond(DaemonReply),
-    /// Send the reply, then stop the daemon.
     Shutdown(DaemonReply),
 }
 
-/// Run one daemon request against the persistent LSP adapter.
 pub(super) fn dispatch_request(
     workspace_root: &Path,
     adapter: &mut PersistentAdapter,
@@ -52,37 +47,30 @@ pub(super) fn dispatch_request(
             target,
             limit,
         } => {
-            let position = adapter.resolve_position(&position)?;
+            let position = adapter.resolve_position(position)?;
             let locations = adapter.goto_locations(&position, target)?;
-            render_locations(workspace_root, position, Some(target), locations, limit)
+            render_location_output(workspace_root, &position, Some(target), &locations, limit)
         }
         DaemonRequest::Usages {
             position,
             declaration,
             limit,
         } => {
-            let position = adapter.resolve_position(&position)?;
+            let position = adapter.resolve_position(position)?;
             let locations = adapter.reference_locations(&position, declaration)?;
-            render_locations(workspace_root, position, None, locations, limit)
+            render_location_output(workspace_root, &position, None, &locations, limit)
         }
         DaemonRequest::FindSymbol { query, kind, limit } => {
             let (symbols, total) = adapter.search_workspace_symbols(&query, kind, limit)?;
-            render_workspace_symbol_output(&WorkspaceSymbolOutput {
-                workspace_root: workspace_root.to_path_buf(),
-                query,
-                kind,
-                total,
-                symbols,
-            })
+            render_workspace_symbol_output(workspace_root, &query, kind, total, &symbols)
         }
         DaemonRequest::Inspect { position } => {
-            let position = adapter.resolve_position(&position)?;
-            inspect(workspace_root, adapter, position)?
+            let position = adapter.resolve_position(position)?;
+            inspect(workspace_root, adapter, &position)?
         }
         DaemonRequest::Explore { position, limit } => {
-            // Resolve once and reuse the position for every section of the bundle.
-            let position = adapter.resolve_position(&position)?;
-            explore(workspace_root, adapter, position, limit)?
+            let position = adapter.resolve_position(position)?;
+            explore(workspace_root, adapter, &position, limit)?
         }
         DaemonRequest::Outline { file, depth, limit } => {
             let symbols = build_symbol_hierarchy(adapter.document_symbols(&file)?);
@@ -90,18 +78,10 @@ pub(super) fn dispatch_request(
                 OutlineDepth::Limited(depth) => prune_outline_depth(symbols, depth),
                 OutlineDepth::Full => symbols,
             };
-            render_outline_output(
-                limit,
-                &OutlineOutput {
-                    workspace_root: workspace_root.to_path_buf(),
-                    file,
-                    depth,
-                    symbols,
-                },
-            )
+            render_outline_output(workspace_root, &file, depth, &symbols, limit)
         }
         DaemonRequest::Rename { position, new_name } => {
-            let position = adapter.resolve_position(&position)?;
+            let position = adapter.resolve_position(position)?;
             let payload = rename(workspace_root, adapter, position, new_name)?;
             return Ok(DispatchResult::Respond(DaemonReply::with_payload(
                 render_rename_output(&payload),
@@ -113,48 +93,40 @@ pub(super) fn dispatch_request(
     Ok(DispatchResult::Respond(DaemonReply::text(text)))
 }
 
-/// Render the symbol at `position` with hover details when a symbol is present.
 fn inspect(
     workspace_root: &Path,
     adapter: &mut PersistentAdapter,
-    position: ResolvedPosition,
+    position: &ResolvedPosition,
 ) -> Result<String> {
     let hover = if position.symbol.is_some() {
-        adapter.hover(&position)?
+        adapter.hover(position)?
     } else {
         String::new()
     };
-    Ok(render_symbol_at_output(&SymbolAtOutput {
-        workspace_root: workspace_root.to_path_buf(),
-        position,
-        hover,
-    }))
+    Ok(render_symbol_at_output(workspace_root, position, &hover))
 }
 
-/// Render the inspection, definitions, and usages of the symbol at `position` as one bundle.
 fn explore(
     workspace_root: &Path,
     adapter: &mut PersistentAdapter,
-    position: ResolvedPosition,
+    position: &ResolvedPosition,
     limit: Option<usize>,
 ) -> Result<String> {
+    let inspect_text = inspect(workspace_root, adapter, position)?;
     if position.symbol.is_none() {
-        let inspect_text = inspect(workspace_root, adapter, position)?;
         return Ok(render_position_bundle(&[("Inspect", inspect_text)]));
     }
 
-    // Each rendered section owns its position, so the copies are deliberate.
-    let inspect_text = inspect(workspace_root, adapter, position.clone())?;
-    let definitions = adapter.goto_locations(&position, GotoTarget::Definition)?;
-    let usages = adapter.reference_locations(&position, Declaration::Include)?;
-    let definition_text = render_locations(
+    let definitions = adapter.goto_locations(position, GotoTarget::Definition)?;
+    let usages = adapter.reference_locations(position, Declaration::Include)?;
+    let definition_text = render_location_output(
         workspace_root,
-        position.clone(),
+        position,
         Some(GotoTarget::Definition),
-        definitions,
+        &definitions,
         limit,
     );
-    let usages_text = render_locations(workspace_root, position, None, usages, limit);
+    let usages_text = render_location_output(workspace_root, position, None, &usages, limit);
     Ok(render_position_bundle(&[
         ("Inspect", inspect_text),
         ("Definition", definition_text),
@@ -162,7 +134,6 @@ fn explore(
     ]))
 }
 
-/// Preview renaming the symbol at `position` to `new_name` as a diff with structured edits.
 fn rename(
     workspace_root: &Path,
     adapter: &mut PersistentAdapter,
@@ -188,22 +159,4 @@ fn rename(
             .count(),
         edits,
     })
-}
-
-fn render_locations(
-    workspace_root: &Path,
-    position: ResolvedPosition,
-    target: Option<GotoTarget>,
-    locations: Vec<LocationRecord>,
-    limit: Option<usize>,
-) -> String {
-    render_location_output(
-        limit,
-        &LocationOutput {
-            workspace_root: workspace_root.to_path_buf(),
-            position,
-            target,
-            locations,
-        },
-    )
 }

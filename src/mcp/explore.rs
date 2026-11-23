@@ -35,7 +35,6 @@ pub(super) struct ExploreRequest {
     pub(super) full: bool,
 }
 
-/// The validated exploration to run, selected by which request fields are present.
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum ExploreTarget {
     WorkspaceSymbols {
@@ -56,16 +55,69 @@ pub(super) struct PreparedExplore {
     pub(super) target: ExploreTarget,
 }
 
-/// Validate the request and resolve its file and workspace root.
 pub(super) fn prepare(request: ExploreRequest) -> Result<PreparedExplore> {
-    let mut target = select_target(&request)?;
+    if request.limit == Some(0) {
+        bail!("limit must be greater than 0");
+    }
+    let has_outline_options = request.depth.is_some() || request.full;
     let workspace = request.workspace.as_deref();
-    let file = match &mut target {
-        ExploreTarget::Outline { file, .. }
-        | ExploreTarget::Position(FilePosition { file, .. }) => {
-            *file = resolve_file(file, workspace)?;
-            Some(file.as_path())
+
+    let target = match (request.file, request.line, request.column) {
+        (None, None, None) => {
+            if workspace.is_none() {
+                bail!("workspace is required when file is omitted");
+            }
+            if has_outline_options {
+                bail!("depth and full are only supported for file outlines");
+            }
+            let query = request
+                .query
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .context("query is required when file is omitted")?;
+            ExploreTarget::WorkspaceSymbols {
+                query: query.to_string(),
+                kind: request.kind,
+            }
         }
+        (Some(file), None, None) => {
+            if request.kind.is_some() {
+                bail!("kind is only supported for workspace symbol search");
+            }
+            if request.depth.is_some() && request.full {
+                bail!("depth cannot be combined with full");
+            }
+            let depth = if request.full {
+                OutlineDepth::Full
+            } else {
+                request
+                    .depth
+                    .map_or_else(OutlineDepth::default, OutlineDepth::Limited)
+            };
+            ExploreTarget::Outline {
+                file: resolve_file(&file, workspace)?,
+                depth,
+            }
+        }
+        (Some(file), Some(line), Some(column)) => {
+            let mut position = FilePosition::new(file, line, column)?;
+            if request.kind.is_some() {
+                bail!("kind is only supported for workspace symbol search");
+            }
+            if has_outline_options {
+                bail!("depth and full are only supported for file outlines");
+            }
+            position.file = resolve_file(&position.file, workspace)?;
+            ExploreTarget::Position(position)
+        }
+        (None, _, _) => bail!("line and column require file"),
+        (Some(_), _, _) => bail!("line and column must be provided together"),
+    };
+
+    let file = match &target {
+        ExploreTarget::Outline { file, .. }
+        | ExploreTarget::Position(FilePosition { file, .. }) => Some(file.as_path()),
         ExploreTarget::WorkspaceSymbols { .. } => None,
     };
     let cwd = env::current_dir().context("failed to determine current directory")?;
@@ -78,7 +130,6 @@ pub(super) fn prepare(request: ExploreRequest) -> Result<PreparedExplore> {
     })
 }
 
-/// Run the prepared exploration through the workspace daemon.
 pub(super) fn execute(prepared: PreparedExplore) -> Result<String> {
     let limit = prepared.limit;
     let request = match prepared.target {
@@ -89,67 +140,4 @@ pub(super) fn execute(prepared: PreparedExplore) -> Result<String> {
         ExploreTarget::Position(position) => DaemonRequest::Explore { position, limit },
     };
     daemon::run_via_daemon(&prepared.workspace_root, request)
-}
-
-/// Validate option combinations and pick the exploration target without touching the filesystem.
-pub(super) fn select_target(request: &ExploreRequest) -> Result<ExploreTarget> {
-    if request.limit == Some(0) {
-        bail!("limit must be greater than 0");
-    }
-    let has_outline_options = request.depth.is_some() || request.full;
-
-    match (&request.file, request.line, request.column) {
-        (None, None, None) => {
-            if request.workspace.is_none() {
-                bail!("workspace is required when file is omitted");
-            }
-            if has_outline_options {
-                bail!("depth and full are only supported for file outlines");
-            }
-            let query = request
-                .query
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .context("query is required when file is omitted")?;
-            Ok(ExploreTarget::WorkspaceSymbols {
-                query: query.to_string(),
-                kind: request.kind,
-            })
-        }
-        (Some(file), None, None) => {
-            reject_kind(request)?;
-            if request.depth.is_some() && request.full {
-                bail!("depth cannot be combined with full");
-            }
-            let depth = if request.full {
-                OutlineDepth::Full
-            } else {
-                request
-                    .depth
-                    .map_or_else(OutlineDepth::default, OutlineDepth::Limited)
-            };
-            Ok(ExploreTarget::Outline {
-                file: file.clone(),
-                depth,
-            })
-        }
-        (Some(file), Some(line), Some(column)) => {
-            let position = FilePosition::new(file.clone(), line, column)?;
-            reject_kind(request)?;
-            if has_outline_options {
-                bail!("depth and full are only supported for file outlines");
-            }
-            Ok(ExploreTarget::Position(position))
-        }
-        (None, _, _) => bail!("line and column require file"),
-        (Some(_), _, _) => bail!("line and column must be provided together"),
-    }
-}
-
-fn reject_kind(request: &ExploreRequest) -> Result<()> {
-    if request.kind.is_some() {
-        bail!("kind is only supported for workspace symbol search");
-    }
-    Ok(())
 }

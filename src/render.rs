@@ -1,13 +1,19 @@
 use std::path::Path;
 
-use crate::cli::GotoTarget;
+use crate::cli::{GotoTarget, SymbolKindFilter};
 use crate::lsp::model::{
-    DocumentSymbolNode, LocationOutput, OutlineOutput, RenameOutput, ResolvedPosition,
-    SymbolAtOutput, WorkspaceSymbolOutput, display_path,
+    DocumentSymbolNode, LocationRecord, OutlineDepth, RenameOutput, ResolvedPosition,
+    WorkspaceSymbolRecord, display_path,
 };
 
-pub(crate) fn render_location_output(limit: Option<usize>, payload: &LocationOutput) -> String {
-    let locations = apply_limit(&payload.locations, limit);
+pub(crate) fn render_location_output(
+    workspace_root: &Path,
+    position: &ResolvedPosition,
+    target: Option<GotoTarget>,
+    all_locations: &[LocationRecord],
+    limit: Option<usize>,
+) -> String {
+    let locations = apply_limit(all_locations, limit);
     let mut results = Vec::new();
 
     for (index, location) in locations.iter().enumerate() {
@@ -16,7 +22,7 @@ pub(crate) fn render_location_output(limit: Option<usize>, payload: &LocationOut
             "{}. {}",
             index + 1,
             format_position(
-                &payload.workspace_root,
+                workspace_root,
                 &location.file,
                 start.line,
                 Some(start.column)
@@ -28,26 +34,33 @@ pub(crate) fn render_location_output(limit: Option<usize>, payload: &LocationOut
     }
 
     join_sections([
-        location_summary(locations.len(), payload.locations.len(), payload),
-        position_context_section(&payload.workspace_root, &payload.position),
+        location_summary(
+            workspace_root,
+            position,
+            target,
+            locations.len(),
+            all_locations.len(),
+        ),
+        position_context_section(workspace_root, position),
         section("Results", results),
     ])
 }
 
-pub(crate) fn render_workspace_symbol_output(payload: &WorkspaceSymbolOutput) -> String {
+pub(crate) fn render_workspace_symbol_output(
+    workspace_root: &Path,
+    query: &str,
+    kind: Option<SymbolKindFilter>,
+    total: usize,
+    symbols: &[WorkspaceSymbolRecord],
+) -> String {
     let mut results = Vec::new();
 
-    for (index, symbol) in payload.symbols.iter().enumerate() {
+    for (index, symbol) in symbols.iter().enumerate() {
         let start = symbol.range.start;
         results.push(format!("{}. {} [{}]", index + 1, symbol.name, symbol.kind));
         results.push(format!(
             "   {}",
-            format_position(
-                &payload.workspace_root,
-                &symbol.file,
-                start.line,
-                Some(start.column)
-            )
+            format_position(workspace_root, &symbol.file, start.line, Some(start.column))
         ));
         if let Some(container) = symbol.container_name.as_deref() {
             results.push(format!("   in {container}"));
@@ -57,17 +70,16 @@ pub(crate) fn render_workspace_symbol_output(payload: &WorkspaceSymbolOutput) ->
         }
     }
 
-    let summary = if payload.symbols.is_empty() {
-        format!("no symbols found for query {:?}", payload.query)
+    let summary = if symbols.is_empty() {
+        format!("no symbols found for query {query:?}")
     } else {
         format!(
-            "{} for query {:?}",
-            format_summary_count(payload.symbols.len(), payload.total, "symbol", "symbols"),
-            payload.query
+            "{} for query {query:?}",
+            format_summary_count(symbols.len(), total, "symbol", "symbols")
         )
     };
-    let mut context = vec![sentence(format!("Query {:?}", payload.query))];
-    if let Some(kind) = payload.kind {
+    let mut context = vec![sentence(format!("Query {query:?}"))];
+    if let Some(kind) = kind {
         context.push(format!("Filtered to {} symbols.", kind.lsp_kind()));
     }
 
@@ -78,9 +90,11 @@ pub(crate) fn render_workspace_symbol_output(payload: &WorkspaceSymbolOutput) ->
     ])
 }
 
-pub(crate) fn render_symbol_at_output(payload: &SymbolAtOutput) -> String {
-    let position = &payload.position;
-    let workspace_root = &payload.workspace_root;
+pub(crate) fn render_symbol_at_output(
+    workspace_root: &Path,
+    position: &ResolvedPosition,
+    hover: &str,
+) -> String {
     let Some(symbol) = position.symbol.as_ref() else {
         return join_sections([
             sentence(format!(
@@ -109,14 +123,10 @@ pub(crate) fn render_symbol_at_output(payload: &SymbolAtOutput) -> String {
         details.push(format!("Detail: {detail}"));
     }
 
-    let hover = if payload.hover.trim().is_empty() {
+    let hover = if hover.trim().is_empty() {
         Vec::new()
     } else {
-        payload
-            .hover
-            .lines()
-            .map(|line| format!("  {line}"))
-            .collect()
+        hover.lines().map(|line| format!("  {line}")).collect()
     };
 
     join_sections([
@@ -127,9 +137,15 @@ pub(crate) fn render_symbol_at_output(payload: &SymbolAtOutput) -> String {
     ])
 }
 
-pub(crate) fn render_outline_output(limit: Option<usize>, payload: &OutlineOutput) -> String {
-    let symbols = apply_limit(&payload.symbols, limit);
-    let display_file = display_path(&payload.workspace_root, &payload.file);
+pub(crate) fn render_outline_output(
+    workspace_root: &Path,
+    file: &Path,
+    depth: OutlineDepth,
+    all_symbols: &[DocumentSymbolNode],
+    limit: Option<usize>,
+) -> String {
+    let symbols = apply_limit(all_symbols, limit);
+    let display_file = display_path(workspace_root, file);
 
     let summary = if symbols.is_empty() {
         format!("no symbols found in {display_file}")
@@ -138,7 +154,7 @@ pub(crate) fn render_outline_output(limit: Option<usize>, payload: &OutlineOutpu
             "{} in {display_file}",
             format_summary_count(
                 symbols.len(),
-                payload.symbols.len(),
+                all_symbols.len(),
                 "top-level symbol",
                 "top-level symbols"
             )
@@ -147,7 +163,7 @@ pub(crate) fn render_outline_output(limit: Option<usize>, payload: &OutlineOutpu
     let context = format!(
         "{}\n{}",
         sentence(format!("File {display_file:?}")),
-        sentence(format!("Depth {}", payload.depth))
+        sentence(format!("Depth {depth}"))
     );
 
     let mut tree = Vec::new();
@@ -173,18 +189,19 @@ pub(crate) fn render_rename_output(payload: &RenameOutput) -> String {
             payload.new_name,
         )
     };
+    let diff = if payload.diff.is_empty() {
+        String::new()
+    } else {
+        format!("Unified diff\n{}", payload.diff.trim_end_matches('\n'))
+    };
 
     join_sections([
         sentence(summary),
         position_context_section(&payload.workspace_root, &payload.position),
-        section(
-            "Unified diff",
-            payload.diff.lines().map(str::to_string).collect(),
-        ),
+        diff,
     ])
 }
 
-/// Combine titled renderings into one markdown response.
 pub(crate) fn render_position_bundle(sections: &[(&str, String)]) -> String {
     sections
         .iter()
@@ -233,9 +250,15 @@ fn format_summary_count(shown: usize, total: usize, singular: &str, plural: &str
     }
 }
 
-fn location_summary(shown: usize, total: usize, payload: &LocationOutput) -> String {
-    let requested = format_requested_position(&payload.workspace_root, &payload.position);
-    let Some(symbol) = payload.position.symbol.as_ref() else {
+fn location_summary(
+    workspace_root: &Path,
+    position: &ResolvedPosition,
+    target: Option<GotoTarget>,
+    shown: usize,
+    total: usize,
+) -> String {
+    let requested = format_requested_position(workspace_root, position);
+    let Some(symbol) = position.symbol.as_ref() else {
         return sentence(if shown == 0 {
             format!("no symbol found at {requested}")
         } else {
@@ -243,13 +266,13 @@ fn location_summary(shown: usize, total: usize, payload: &LocationOutput) -> Str
         });
     };
 
-    let (singular, plural) = match payload.target {
+    let (singular, plural) = match target {
         Some(GotoTarget::Definition) => ("definition", "definitions"),
         Some(GotoTarget::Declaration) => ("declaration", "declarations"),
         Some(GotoTarget::Type) => ("type definition", "type definitions"),
         None => ("usage", "usages"),
     };
-    sentence(match (shown, payload.target) {
+    sentence(match (shown, target) {
         (0, Some(_)) => format!(
             "no {singular} found for symbol {:?} at {requested}",
             symbol.name
@@ -320,7 +343,6 @@ fn format_snippet_line(prefix: &str, line: usize, snippet: &str) -> String {
     format!("{prefix}{line} | {snippet}")
 }
 
-/// Render a titled block, or an empty string (dropped by `join_sections`) when it has no lines.
 fn section(title: &str, lines: Vec<String>) -> String {
     if lines.is_empty() {
         return String::new();

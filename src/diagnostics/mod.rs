@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use self::parser::{parse_ruff_output, parse_ty_output};
@@ -85,7 +85,6 @@ impl DiagnosticSource {
         }
     }
 
-    /// Locate this tool's binary for the workspace.
     fn locate(self, workspace_root: &Path) -> Result<PathBuf> {
         match self {
             Self::Ruff => locate_ruff_binary(workspace_root),
@@ -93,7 +92,6 @@ impl DiagnosticSource {
         }
     }
 
-    /// Run this tool's check on `target` and parse its diagnostics.
     fn execute(
         self,
         binary: &Path,
@@ -127,31 +125,23 @@ struct ToolRun {
     result: Result<Vec<DiagnosticRecord>>,
 }
 
-/// Run Ruff and ty for the requested filesystem scope and normalize their diagnostics.
 pub(crate) fn run_diagnostics(
     workspace_root: &Path,
     target: &Path,
     limit: usize,
 ) -> DiagnosticsOutput {
     let (ruff_run, ty_run) = thread::scope(|scope| {
-        let spawn = |source: DiagnosticSource| {
-            let worker = scope.spawn(move || run_tool(source, workspace_root, target));
-            move || {
-                worker.join().unwrap_or_else(|_| ToolRun {
-                    binary: None,
-                    result: Err(anyhow!("{} diagnostics worker panicked", source.label())),
-                })
-            }
-        };
-        let ruff = spawn(DiagnosticSource::Ruff);
-        let ty = spawn(DiagnosticSource::Ty);
-        (ruff(), ty())
+        let ruff = scope.spawn(|| run_tool(DiagnosticSource::Ruff, workspace_root, target));
+        let ty_run = run_tool(DiagnosticSource::Ty, workspace_root, target);
+        (
+            ruff.join().expect("ruff diagnostics worker panicked"),
+            ty_run,
+        )
     });
 
     build_output(workspace_root, target, limit, ruff_run, ty_run)
 }
 
-/// Render a compact agent-oriented summary of a diagnostics result.
 pub(crate) fn render_diagnostics(output: &DiagnosticsOutput) -> String {
     let mut lines = Vec::new();
     if output.total == 0 && output.complete {
@@ -210,7 +200,6 @@ pub(crate) fn render_diagnostics(output: &DiagnosticsOutput) -> String {
     lines.join("\n")
 }
 
-/// Locate a diagnostics tool and run it, keeping the binary path for reporting.
 fn run_tool(source: DiagnosticSource, workspace_root: &Path, target: &Path) -> ToolRun {
     match source.locate(workspace_root) {
         Ok(binary) => ToolRun {

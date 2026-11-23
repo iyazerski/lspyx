@@ -14,7 +14,6 @@ use url::Url;
 
 use crate::workspace::ty_server_configuration;
 
-/// An LSP `FileChangeType`: how a watched file changed on disk.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum FileChangeType {
     Created = 1,
@@ -22,23 +21,17 @@ pub(crate) enum FileChangeType {
     Deleted = 3,
 }
 
-/// A JSON-RPC session with a `ty server` child process over stdio.
 #[derive(Debug)]
 pub(crate) struct LspSession {
     child: Child,
     stdin: BufWriter<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     next_id: i64,
-    /// Set when a message failed to go through, so the stream framing can't be trusted.
+    /// Set after any transport error because stream framing can no longer be trusted.
     transport_failed: bool,
 }
 
 impl LspSession {
-    /// Spawn `binary server` in `workspace_root` and complete the LSP handshake.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the server cannot be started or rejects initialization.
     pub(crate) fn start(binary: &Path, workspace_root: &Path) -> Result<Self> {
         let mut child = Command::new(binary)
             .arg("server")
@@ -159,7 +152,6 @@ impl LspSession {
         )
     }
 
-    /// Tell the server which files changed on disk, so it stops using cached contents.
     pub(crate) fn change_watched_files(
         &mut self,
         changes: &BTreeMap<PathBuf, FileChangeType>,
@@ -176,11 +168,6 @@ impl LspSession {
         )
     }
 
-    /// Send a request and wait for its result, skipping unrelated server messages.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error on I/O failure or when the server answers with an LSP error.
     pub(crate) fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
@@ -228,11 +215,6 @@ impl LspSession {
             .inspect_err(|_| self.transport_failed = true)
     }
 
-    /// Fail when the server exited or a message failed to go through.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error describing why the session can't serve more requests.
     pub(crate) fn ensure_running(&mut self) -> Result<()> {
         if let Some(status) = self.child.try_wait()? {
             bail!("ty server exited ({status})");
@@ -243,7 +225,6 @@ impl LspSession {
         Ok(())
     }
 
-    /// Ask the server to exit and wait for it; teardown is best effort, so failures are ignored.
     pub(crate) fn shutdown(mut self) {
         let _ = self.request("shutdown", json!(null));
         let _ = self.notify("exit", json!(null));
@@ -292,26 +273,24 @@ pub(crate) fn path_to_file_uri(path: &Path) -> Result<String> {
         .map(|value| value.to_string())
 }
 
-/// Read trimmed source lines for snippets, loading each file at most once.
 #[derive(Debug, Default)]
 pub(crate) struct SnippetReader {
     files: HashMap<PathBuf, Option<String>>,
 }
 
 impl SnippetReader {
-    /// Return the trimmed 1-based `line` of `path`, or `None` when it cannot be read.
     pub(crate) fn snippet(&mut self, path: &Path, line: usize) -> Option<String> {
-        let text = self
-            .files
-            .entry(path.to_path_buf())
-            .or_insert_with(|| fs::read_to_string(path).ok());
-        nth_line(text.as_deref()?, line).map(|value| value.trim().to_string())
+        if !self.files.contains_key(path) {
+            self.files
+                .insert(path.to_path_buf(), fs::read_to_string(path).ok());
+        }
+        let text = self.files.get(path)?.as_deref()?;
+        nth_line(text, line).map(|value| value.trim().to_string())
     }
 }
 
-/// Return the 1-based `line_number` of `text`.
 pub(crate) fn nth_line(text: &str, line_number: usize) -> Option<&str> {
-    text.lines().nth(line_number.saturating_sub(1))
+    text.lines().nth(line_number.checked_sub(1)?)
 }
 
 pub(crate) fn column_to_utf16_offset(line_text: &str, column_number: usize) -> Result<usize> {
