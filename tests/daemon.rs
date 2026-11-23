@@ -1,5 +1,3 @@
-//! End-to-end checks of the CLI and its workspace daemon against the real ty.
-
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -7,7 +5,6 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
-/// A Python project with its own HOME, so the daemon it starts is isolated from real ones.
 struct Project {
     home: TempDir,
     root: TempDir,
@@ -45,7 +42,6 @@ impl Project {
         self.command(args).output().expect("failed to run lspyx")
     }
 
-    /// Run lspyx and return its stdout, failing the test when the command fails.
     fn lspyx(&self, args: &[&str]) -> String {
         let output = self.run(args);
         assert!(

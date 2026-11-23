@@ -35,7 +35,6 @@ pub(super) struct ExploreRequest {
     pub(super) full: bool,
 }
 
-/// The validated exploration to run, selected by which request fields are present.
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum ExploreTarget {
     WorkspaceSymbols {

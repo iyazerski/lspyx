@@ -1,7 +1,4 @@
-//! `lspyx update`: replace this binary with the latest GitHub release when it's newer.
-//!
-//! It downloads and checks the same files as `install.sh`, with the same tools (`curl`, `tar`, and
-//! `sha256sum` or `shasum`), so lspyx doesn't need an HTTP client of its own.
+//! Uses `curl`, `tar`, and `sha256sum`/`shasum` like `install.sh` so lspyx needs no HTTP client.
 
 use std::env;
 use std::fs;
@@ -14,7 +11,6 @@ const REPO: &str = "iyazerski/lspyx";
 const BINARY: &str = "lspyx";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Install the latest release over this binary if it's newer, and return a summary.
 pub(crate) fn run_update() -> Result<String> {
     let exe = env::current_exe().context("failed to resolve current lspyx binary")?;
     // Homebrew owns the files under its Cellar, so replacing them would break `brew upgrade`.
@@ -55,8 +51,6 @@ pub(crate) fn run_update() -> Result<String> {
     ))
 }
 
-/// Download, verify, and unpack `tag`'s archive in `staging`, then move the binary over `exe`
-/// in one step, so a failure never leaves a broken binary.
 fn install(tag: &str, staging: &Path, exe: &Path) -> Result<()> {
     let asset = asset()?;
     let url = format!("https://github.com/{REPO}/releases/download/{tag}/{asset}");
@@ -88,11 +82,11 @@ fn install(tag: &str, staging: &Path, exe: &Path) -> Result<()> {
             .current_dir(staging),
         "unpacking the release",
     )?;
+    // Atomic replace so a failed update never leaves a broken binary.
     fs::rename(staging.join(BINARY), exe)
         .with_context(|| format!("failed to replace {}", exe.display()))
 }
 
-/// Return the release archive name for this platform, matching `install.sh`.
 fn asset() -> Result<String> {
     let platform = match env::consts::OS {
         "macos" => "apple-darwin",
@@ -102,7 +96,6 @@ fn asset() -> Result<String> {
     Ok(format!("{BINARY}-{}-{platform}.tar.gz", env::consts::ARCH))
 }
 
-/// Run `command` and return its trimmed stdout, or fail with `what` and its stderr.
 fn run(command: &mut Command, what: &str) -> Result<String> {
     let output = command
         .output()
@@ -113,7 +106,6 @@ fn run(command: &mut Command, what: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Return whether version `a` (like `0.5.10`) is newer than `b`, comparing numbers in order.
 pub(crate) fn is_newer(a: &str, b: &str) -> bool {
     fn parts(version: &str) -> impl Iterator<Item = u64> + '_ {
         version

@@ -1,5 +1,3 @@
-//! A 1-based position in a file, shared by CLI, MCP, and daemon requests.
-
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -15,11 +13,6 @@ pub(crate) struct FilePosition {
 }
 
 impl FilePosition {
-    /// Build a position from user input.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `line` or `column` is zero.
     pub(crate) fn new(file: PathBuf, line: usize, column: usize) -> Result<Self> {
         if line == 0 {
             bail!("line must be a 1-based value");
@@ -34,8 +27,8 @@ impl FilePosition {
 impl FromStr for FilePosition {
     type Err = Error;
 
-    /// Parse `file:line:column`, splitting from the right so paths may contain colons.
     fn from_str(input: &str) -> Result<Self> {
+        // Split from the right so paths may contain colons.
         let format_error = || format!("expected FILE:LINE:COLUMN format, got: {input}");
         let Some((rest, column)) = input.rsplit_once(':') else {
             bail!(format_error());

@@ -21,14 +21,12 @@ use crate::lsp::{
     FileChangeType, LspSession, SnippetReader, column_to_utf16_offset, nth_line, path_to_file_uri,
 };
 
-/// A long-lived ty LSP session that keeps request files synced as open documents.
 #[derive(Debug)]
 pub(super) struct PersistentAdapter {
     session: LspSession,
     watcher: WorkspaceWatcher,
-    /// Set once forwarding disk changes failed, so ty's view of the disk can't be trusted.
     sync_failed: bool,
-    /// Open documents keyed by their canonical path; request files are canonicalized by clients.
+    /// Keyed by canonical path.
     documents: HashMap<PathBuf, OpenDocument>,
 }
 
@@ -54,16 +52,10 @@ impl PersistentAdapter {
         })
     }
 
-    /// Shut down the LSP session.
     pub(super) fn shutdown(self) {
         self.session.shutdown();
     }
 
-    /// Fail when the ty session or the file watcher can no longer give correct answers.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error describing the broken part.
     pub(super) fn ensure_healthy(&mut self) -> Result<()> {
         if self.sync_failed {
             bail!("failed to forward file changes to ty");
@@ -71,11 +63,6 @@ impl PersistentAdapter {
         self.session.ensure_running()
     }
 
-    /// Forward disk changes since the last request to ty and refresh changed open documents.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the watcher lost events or ty can't be notified.
     pub(super) fn sync_workspace_changes(&mut self) -> Result<()> {
         // The changes are consumed either way, so a failed sync leaves ty out of date for good.
         self.forward_workspace_changes()
@@ -104,7 +91,6 @@ impl PersistentAdapter {
         self.session.change_watched_files(&changes)
     }
 
-    /// Identify the symbol at `position`, enriched with its document symbol kind and detail.
     pub(super) fn resolve_position(&mut self, position: FilePosition) -> Result<ResolvedPosition> {
         let FilePosition { file, line, column } = position;
         self.ensure_file_synced(&file)?;
@@ -126,7 +112,6 @@ impl PersistentAdapter {
         })
     }
 
-    /// Add kind and detail from the matching document symbol, when there is one.
     fn describe_symbol(
         &mut self,
         file: &Path,
@@ -190,7 +175,6 @@ impl PersistentAdapter {
         parse_document_symbols(response)
     }
 
-    /// Search workspace symbols, keep the best matches, and return them with the match total.
     pub(super) fn search_workspace_symbols(
         &mut self,
         query: &str,
@@ -207,7 +191,6 @@ impl PersistentAdapter {
             symbols.truncate(limit);
         }
 
-        // Read snippets only for the symbols that will be shown.
         let mut snippets = SnippetReader::default();
         for symbol in &mut symbols {
             symbol.snippet = snippets.snippet(&symbol.file, symbol.range.start.line);
@@ -232,7 +215,6 @@ impl PersistentAdapter {
         parse_workspace_symbols(response)
     }
 
-    /// Send a location request and attach source snippets to the results.
     fn locations(&mut self, method: &str, params: Value) -> Result<Vec<LocationRecord>> {
         let mut locations = parse_location_response(self.session.request(method, params)?)?;
         let mut snippets = SnippetReader::default();
@@ -242,7 +224,6 @@ impl PersistentAdapter {
         Ok(locations)
     }
 
-    /// Sync the position's file and build `TextDocumentPositionParams` for it.
     fn position_params(&mut self, position: &ResolvedPosition) -> Result<Value> {
         self.ensure_file_synced(&position.file)?;
         let line_text = self.document_line(&position.file, position.line)?;
@@ -274,7 +255,6 @@ impl PersistentAdapter {
         Ok(())
     }
 
-    /// Return a 1-based line from the synced text of `file`.
     fn document_line(&self, file: &Path, line: usize) -> Result<&str> {
         let document = self
             .documents
@@ -285,7 +265,6 @@ impl PersistentAdapter {
     }
 }
 
-/// Rank symbols: exact matches win outright, then prefix, substring, and other matches.
 fn rank_workspace_symbols(
     query: &str,
     mut symbols: Vec<WorkspaceSymbolRecord>,

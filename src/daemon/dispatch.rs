@@ -17,11 +17,9 @@ use crate::render::{
 #[derive(Debug)]
 pub(super) enum DispatchResult {
     Respond(DaemonReply),
-    /// Send the reply, then stop the daemon.
     Shutdown(DaemonReply),
 }
 
-/// Run one daemon request against the persistent LSP adapter.
 pub(super) fn dispatch_request(
     workspace_root: &Path,
     adapter: &mut PersistentAdapter,
@@ -136,7 +134,6 @@ fn explore(
     ]))
 }
 
-/// Preview renaming the symbol at `position` to `new_name` as a diff with structured edits.
 fn rename(
     workspace_root: &Path,
     adapter: &mut PersistentAdapter,

@@ -48,12 +48,10 @@ pub(crate) fn resolve_workspace_root_for_target(target: &Path, cwd: &Path) -> Re
     canonicalize_path(&detect_workspace_root(None, seed))
 }
 
-/// Return the lspyx cache directory, or `None` when HOME is unset.
 pub(crate) fn cache_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache").join("lspyx"))
 }
 
-/// Return a stable per-workspace key used to name cache entries.
 pub(crate) fn workspace_cache_key(workspace_root: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     workspace_root.hash(&mut hasher);
@@ -84,20 +82,17 @@ fn locate_workspace_binary(
     override_variable: &str,
     missing_message: &'static str,
 ) -> Result<PathBuf> {
-    // Allow an explicit override for debugging or alternate installs.
     if let Some(path) = env::var_os(override_variable).map(PathBuf::from)
         && path.is_file()
     {
         return Ok(path);
     }
 
-    // Prefer the workspace virtualenv to match the active project environment.
     let local_binary = workspace_root.join(".venv").join("bin").join(name);
     if local_binary.is_file() {
         return Ok(local_binary);
     }
 
-    // Fall back to a PATH lookup for globally installed toolchains.
     which::which(name).context(missing_message)
 }
 
@@ -182,18 +177,15 @@ fn contains_python_project_hint(path: &Path) -> Result<bool> {
     Ok(false)
 }
 
-/// List a directory with a path-aware error message.
 fn read_dir(path: &Path) -> Result<fs::ReadDir> {
     fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))
 }
 
-/// Return whether a directory entry is a real (non-symlink) directory worth scanning.
 fn is_walkable_dir(entry: &DirEntry) -> Result<bool> {
-    // `file_type` does not follow symlinks, which avoids an extra stat and symlink cycles.
+    // `file_type` does not follow symlinks, avoiding extra stats and symlink cycles.
     Ok(entry.file_type()?.is_dir() && !is_ignored_dir_name(&entry.file_name()))
 }
 
-/// Return whether a directory with this name holds tool state or dependencies, not project code.
 pub(crate) fn is_ignored_dir_name(name: &OsStr) -> bool {
     matches!(
         name.to_str(),

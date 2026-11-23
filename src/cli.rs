@@ -91,7 +91,6 @@ pub(crate) struct UsagesArgs {
 }
 
 impl UsagesArgs {
-    /// Return whether usages should include the declaration site.
     pub(crate) fn declaration(&self) -> Declaration {
         if self.exclude_declaration {
             Declaration::Exclude
@@ -109,11 +108,6 @@ pub(crate) struct PositionArgs {
 }
 
 impl PositionArgs {
-    /// Parse the location and canonicalize its file.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the location is malformed or the file cannot be resolved.
     pub(crate) fn resolve(&self) -> Result<FilePosition> {
         let mut position: FilePosition = self.location.parse()?;
         position.file = canonicalize_path(&position.file)?;
@@ -157,7 +151,6 @@ pub(crate) struct OutlineArgs {
 }
 
 impl OutlineArgs {
-    /// Return the requested outline depth.
     pub(crate) fn outline_depth(&self) -> OutlineDepth {
         if self.full {
             OutlineDepth::Full
@@ -194,7 +187,6 @@ pub(crate) enum SymbolKindFilter {
 }
 
 impl SymbolKindFilter {
-    /// Return the LSP symbol kind this filter selects.
     pub(crate) fn lsp_kind(self) -> SymbolKind {
         match self {
             Self::Class => SymbolKind::CLASS,

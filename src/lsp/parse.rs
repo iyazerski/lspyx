@@ -12,7 +12,6 @@ use crate::lsp::model::{
     SymbolAtRecord, SymbolKind, WorkspaceSymbolRecord,
 };
 
-/// Zero-based LSP wire position, converted into a 1-based [`PositionRecord`].
 #[derive(Deserialize)]
 pub(crate) struct LspPosition {
     line: usize,
@@ -112,7 +111,6 @@ enum HoverContents {
     Markup { value: String },
 }
 
-/// Deserialize an LSP result, treating `null` as the default (empty) value.
 fn parse_result<T: DeserializeOwned + Default>(value: Value, method: &str) -> Result<T> {
     Ok(serde_json::from_value::<Option<T>>(value)
         .with_context(|| format!("invalid {method} response"))?
@@ -278,7 +276,6 @@ pub(crate) fn prune_outline_depth(
         .collect()
 }
 
-/// Extract the identifier at (or just before) a 1-based column of `line`.
 pub(crate) fn extract_symbol_at(
     line: &str,
     column_number: usize,

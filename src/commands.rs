@@ -131,7 +131,6 @@ fn run_outline(args: OutlineArgs) -> Result<String> {
     )
 }
 
-/// Resolve the workspace root from an explicit override, a target file, or the current directory.
 fn workspace_root(workspace_override: Option<&Path>, file: Option<&Path>) -> Result<PathBuf> {
     let cwd = env::current_dir().context("failed to determine current directory")?;
     resolve_workspace_root(workspace_override, file, &cwd)

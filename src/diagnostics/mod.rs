@@ -85,7 +85,6 @@ impl DiagnosticSource {
         }
     }
 
-    /// Locate this tool's binary for the workspace.
     fn locate(self, workspace_root: &Path) -> Result<PathBuf> {
         match self {
             Self::Ruff => locate_ruff_binary(workspace_root),
@@ -93,7 +92,6 @@ impl DiagnosticSource {
         }
     }
 
-    /// Run this tool's check on `target` and parse its diagnostics.
     fn execute(
         self,
         binary: &Path,
@@ -127,7 +125,6 @@ struct ToolRun {
     result: Result<Vec<DiagnosticRecord>>,
 }
 
-/// Run Ruff and ty for the requested filesystem scope and normalize their diagnostics.
 pub(crate) fn run_diagnostics(
     workspace_root: &Path,
     target: &Path,
@@ -145,7 +142,6 @@ pub(crate) fn run_diagnostics(
     build_output(workspace_root, target, limit, ruff_run, ty_run)
 }
 
-/// Render a compact agent-oriented summary of a diagnostics result.
 pub(crate) fn render_diagnostics(output: &DiagnosticsOutput) -> String {
     let mut lines = Vec::new();
     if output.total == 0 && output.complete {
@@ -204,7 +200,6 @@ pub(crate) fn render_diagnostics(output: &DiagnosticsOutput) -> String {
     lines.join("\n")
 }
 
-/// Locate a diagnostics tool and run it, keeping the binary path for reporting.
 fn run_tool(source: DiagnosticSource, workspace_root: &Path, target: &Path) -> ToolRun {
     match source.locate(workspace_root) {
         Ok(binary) => ToolRun {

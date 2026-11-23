@@ -202,7 +202,6 @@ pub(crate) fn render_rename_output(payload: &RenameOutput) -> String {
     ])
 }
 
-/// Combine titled renderings into one markdown response.
 pub(crate) fn render_position_bundle(sections: &[(&str, String)]) -> String {
     sections
         .iter()
@@ -344,7 +343,6 @@ fn format_snippet_line(prefix: &str, line: usize, snippet: &str) -> String {
     format!("{prefix}{line} | {snippet}")
 }
 
-/// Render a titled block, or an empty string (dropped by `join_sections`) when it has no lines.
 fn section(title: &str, lines: Vec<String>) -> String {
     if lines.is_empty() {
         return String::new();

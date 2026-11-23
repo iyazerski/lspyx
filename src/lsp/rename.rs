@@ -6,7 +6,6 @@ use similar::TextDiff;
 
 use crate::lsp::model::{PositionRecord, RenameEditRecord, display_path};
 
-/// Build a complete unified diff from validated semantic rename edits sorted by file.
 pub(crate) fn build_rename_diff(
     workspace_root: &Path,
     old_name: &str,

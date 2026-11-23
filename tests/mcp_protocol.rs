@@ -83,7 +83,6 @@ impl McpServer {
         self.stdin.flush().expect("failed to flush mcp message");
     }
 
-    /// Call `tool` with `arguments` and return the JSON-RPC response.
     fn call_tool(&mut self, tool: &str, arguments: Value) -> Value {
         self.send(json!({
             "jsonrpc": "2.0",
