@@ -347,20 +347,12 @@ mod tests {
     }
 
     #[test]
-    fn exact_case_sensitive_workspace_symbol_matches_win() {
+    fn ranks_workspace_symbols_exact_then_prefix_then_substring() {
         assert_eq!(
             ranked("Order", &["order", "Order", "OrderManager"]),
             vec!["Order"]
         );
-    }
-
-    #[test]
-    fn exact_case_insensitive_workspace_symbol_matches_win() {
         assert_eq!(ranked("Order", &["order", "OrderManager"]), vec!["order"]);
-    }
-
-    #[test]
-    fn prefix_workspace_symbol_matches_rank_before_substrings() {
         assert_eq!(
             ranked(
                 "Order",

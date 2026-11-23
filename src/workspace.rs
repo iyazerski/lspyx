@@ -233,29 +233,25 @@ fn relative_root_string(workspace_root: &Path, path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::env;
     use std::fs;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use tempfile::TempDir;
 
     use super::{detect_workspace_root, discover_ty_roots};
 
     #[test]
     fn workspace_root_prefers_pyproject() {
-        let base = unique_temp_dir("lspyx-test");
-        let nested = base.join("a").join("b").join("c");
+        let base = TempDir::new().unwrap();
+        let nested = base.path().join("a").join("b").join("c");
         fs::create_dir_all(&nested).unwrap();
-        fs::write(base.join("pyproject.toml"), "[project]\nname='x'\n").unwrap();
+        fs::write(base.path().join("pyproject.toml"), "[project]\nname='x'\n").unwrap();
 
-        let detected = detect_workspace_root(None, &nested);
-        assert_eq!(detected, base);
-
-        fs::remove_dir_all(&base).unwrap();
+        assert_eq!(detect_workspace_root(None, &nested), base.path());
     }
 
     #[test]
     fn ty_roots_include_src_trees_and_python_groups() {
-        let base = unique_temp_dir("lspyx-roots");
+        let base = TempDir::new().unwrap();
         for dir in [
             "src",
             "packages/api/src",
@@ -263,14 +259,13 @@ mod tests {
             "python/pkg",
             ".venv/lib/src",
         ] {
-            fs::create_dir_all(base.join(dir)).unwrap();
+            fs::create_dir_all(base.path().join(dir)).unwrap();
         }
-        fs::write(base.join("python/examples/demo.py"), "").unwrap();
-        fs::write(base.join("python/pkg/__init__.py"), "").unwrap();
+        fs::write(base.path().join("python/examples/demo.py"), "").unwrap();
+        fs::write(base.path().join("python/pkg/__init__.py"), "").unwrap();
 
-        let roots = discover_ty_roots(&base).unwrap();
         assert_eq!(
-            roots,
+            discover_ty_roots(base.path()).unwrap(),
             vec![
                 ".",
                 "./packages/api/src",
@@ -279,15 +274,5 @@ mod tests {
                 "./src",
             ]
         );
-
-        fs::remove_dir_all(&base).unwrap();
-    }
-
-    fn unique_temp_dir(prefix: &str) -> PathBuf {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        env::temp_dir().join(format!("{prefix}-{suffix}"))
     }
 }

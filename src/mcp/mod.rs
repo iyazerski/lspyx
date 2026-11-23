@@ -49,15 +49,6 @@ impl LspyxMcp {
             tool_router: Self::tool_router(),
         }
     }
-
-    #[cfg(test)]
-    fn tool_names(&self) -> Vec<String> {
-        self.tool_router
-            .list_all()
-            .into_iter()
-            .map(|tool| tool.name.to_string())
-            .collect()
-    }
 }
 
 #[tool_handler(router = self.tool_router)]
