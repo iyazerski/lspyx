@@ -312,7 +312,7 @@ impl SnippetReader {
 
 /// Return the 1-based `line_number` of `text`.
 pub(crate) fn nth_line(text: &str, line_number: usize) -> Option<&str> {
-    text.lines().nth(line_number.saturating_sub(1))
+    text.lines().nth(line_number.checked_sub(1)?)
 }
 
 pub(crate) fn column_to_utf16_offset(line_text: &str, column_number: usize) -> Result<usize> {

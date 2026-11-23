@@ -98,6 +98,20 @@ struct LspTextEdit {
     new_text: String,
 }
 
+#[derive(Deserialize)]
+struct LspHover {
+    contents: HoverContents,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum HoverContents {
+    Text(String),
+    List(Vec<HoverContents>),
+    Marked { language: String, value: String },
+    Markup { value: String },
+}
+
 /// Deserialize an LSP result, treating `null` as the default (empty) value.
 fn parse_result<T: DeserializeOwned + Default>(value: Value, method: &str) -> Result<T> {
     Ok(serde_json::from_value::<Option<T>>(value)
@@ -134,38 +148,23 @@ pub(crate) fn parse_location_response(value: Value) -> Result<Vec<LocationRecord
 }
 
 pub(crate) fn parse_hover_contents(value: Value) -> Result<String> {
-    if value.is_null() {
-        return Ok(String::new());
-    }
-
-    let contents = value
-        .get("contents")
-        .context("hover response missing contents")?;
-    Ok(stringify_hover_contents(contents))
+    let hover = serde_json::from_value::<Option<LspHover>>(value)
+        .context("invalid textDocument/hover response")?;
+    Ok(hover.map_or_else(String::new, |hover| {
+        stringify_hover_contents(hover.contents)
+    }))
 }
 
-fn stringify_hover_contents(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Array(items) => items
-            .iter()
+fn stringify_hover_contents(contents: HoverContents) -> String {
+    match contents {
+        HoverContents::Text(text) | HoverContents::Markup { value: text } => text,
+        HoverContents::Marked { language, value } => format!("```{language}\n{value}\n```"),
+        HoverContents::List(items) => items
+            .into_iter()
             .map(stringify_hover_contents)
             .filter(|value| !value.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n"),
-        Value::Object(map) => match (
-            map.get("language").and_then(Value::as_str),
-            map.get("value"),
-        ) {
-            // `MarkedString` with a language is a fenced code block.
-            (Some(language), Some(body)) => {
-                format!("```{language}\n{}\n```", stringify_hover_contents(body))
-            }
-            // `MarkupContent` already carries rendered markdown or plain text.
-            (None, Some(body)) => stringify_hover_contents(body),
-            _ => serde_json::to_string_pretty(value).unwrap_or_default(),
-        },
-        _ => value.to_string(),
     }
 }
 

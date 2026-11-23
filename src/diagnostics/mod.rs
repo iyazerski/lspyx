@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use self::parser::{parse_ruff_output, parse_ty_output};
@@ -134,18 +134,12 @@ pub(crate) fn run_diagnostics(
     limit: usize,
 ) -> DiagnosticsOutput {
     let (ruff_run, ty_run) = thread::scope(|scope| {
-        let spawn = |source: DiagnosticSource| {
-            let worker = scope.spawn(move || run_tool(source, workspace_root, target));
-            move || {
-                worker.join().unwrap_or_else(|_| ToolRun {
-                    binary: None,
-                    result: Err(anyhow!("{} diagnostics worker panicked", source.label())),
-                })
-            }
-        };
-        let ruff = spawn(DiagnosticSource::Ruff);
-        let ty = spawn(DiagnosticSource::Ty);
-        (ruff(), ty())
+        let ruff = scope.spawn(|| run_tool(DiagnosticSource::Ruff, workspace_root, target));
+        let ty_run = run_tool(DiagnosticSource::Ty, workspace_root, target);
+        (
+            ruff.join().expect("ruff diagnostics worker panicked"),
+            ty_run,
+        )
     });
 
     build_output(workspace_root, target, limit, ruff_run, ty_run)
